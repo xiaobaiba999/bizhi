@@ -210,7 +210,7 @@ export function TokenSettingsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="max-h-[70vh] overflow-y-auto p-5">
+        <div className="custom-scrollbar max-h-[calc(100vh-7rem)] overflow-y-auto p-5">
           {/* 令牌状态卡 */}
           {state.token ? (
             <div className="mb-4 rounded-xl border bg-muted/40 p-3.5">
@@ -242,10 +242,10 @@ export function TokenSettingsDialog({
               </div>
             </div>
           ) : (
-            <div className="mb-4 rounded-xl border border-dashed p-3.5">
-              <div className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
-                <KeyRound className="size-4" />
-                暂无令牌 —— 当前下载原图为官网预览质量（约 1100px）
+            <div className="mb-4 rounded-xl border border-dashed px-3.5 py-2.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                <KeyRound className="size-3.5 shrink-0" />
+                <span className="truncate">暂无令牌 —— 当前下载为预览质量（约 1100px）</span>
               </div>
             </div>
           )}
@@ -293,7 +293,7 @@ export function TokenSettingsDialog({
                   <p className="text-xs text-muted-foreground">令牌已自动保存，下载原图已解锁高清原图</p>
                 </div>
               ) : phase === "loading" ? (
-                <div className="flex aspect-square w-full max-w-[220px] items-center justify-center rounded-2xl bg-muted/50">
+                <div className="mx-auto flex h-[344px] w-[240px] items-center justify-center rounded-2xl bg-muted/50">
                   <span className="size-8 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
                 </div>
               ) : phase === "error" ? (
@@ -305,10 +305,11 @@ export function TokenSettingsDialog({
                   </Button>
                 </div>
               ) : (
-                <div className="relative mx-auto max-w-[220px]">
+                <div className="relative mx-auto h-[344px] w-[240px]">
+                  {/* 微信开放平台组件自然尺寸 300×430：整体缩放 0.8 完整显示，不再裁切 */}
                   <div
                     className={cn(
-                      "overflow-hidden rounded-2xl border-4 border-neutral-100 bg-white transition-opacity",
+                      "h-[344px] w-[240px] overflow-hidden rounded-2xl border bg-white transition-opacity",
                       (expired || phase === "expired") && "opacity-25"
                     )}
                   >
@@ -316,11 +317,12 @@ export function TokenSettingsDialog({
                       key={qr?.state ?? "qr"}
                       src={qr?.qrUrl ?? "about:blank"}
                       title="哲风壁纸微信扫码登录二维码"
-                      width="220"
-                      height="220"
+                      width={300}
+                      height={430}
                       scrolling="no"
                       frameBorder={0}
-                      className="block h-[220px] w-full"
+                      style={{ width: 300, height: 430, transform: "scale(0.8)", transformOrigin: "top left" }}
+                      className="block border-0"
                     />
                   </div>
                   {(expired || phase === "expired") && (

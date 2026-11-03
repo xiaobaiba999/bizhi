@@ -3,19 +3,20 @@
 import { create } from "zustand"
 import { usePublishStore } from "./store"
 
-export type AppTab = "workshop" | "publish"
+/** 内嵌原网页视图类型：小红书创作者中心 / 夸克网盘 */
+export type WebviewKind = "xhs" | "quark"
 
 interface AppState {
-  tab: AppTab
-  setTab: (tab: AppTab) => void
-
-  /** 夸克网盘内嵌窗口（右上角入口调起） */
-  netdiskOpen: boolean
-  setNetdiskOpen: (open: boolean) => void
+  /** 当前全屏接管的内嵌网页（null = 未打开，回到工坊界面） */
+  webview: WebviewKind | null
+  /** 打开内嵌网页（直接接管整个软件页面） */
+  openWebview: (kind: WebviewKind) => void
+  /** 关闭内嵌网页，返回壁纸工坊 */
+  closeWebview: () => void
 
   /**
    * 带图跳转到小红书发布（来自壁纸工坊）。
-   * 图片进入「暂存架」，在创作者中心原网页里上传发布。
+   * 图片进入「暂存架」，创作者中心原网页接管页面后可下载上传发布。
    */
   goPublish: (srcs: string[]) => void
 }
@@ -23,11 +24,9 @@ interface AppState {
 let extUid = 0
 
 export const useAppStore = create<AppState>((set) => ({
-  tab: "workshop",
-  setTab: (tab) => set({ tab }),
-
-  netdiskOpen: false,
-  setNetdiskOpen: (netdiskOpen) => set({ netdiskOpen }),
+  webview: null,
+  openWebview: (webview) => set({ webview }),
+  closeWebview: () => set({ webview: null }),
 
   goPublish: (srcs) => {
     usePublishStore.setState({
@@ -37,6 +36,6 @@ export const useAppStore = create<AppState>((set) => ({
         source: "gallery" as const,
       })),
     })
-    set({ tab: "publish" })
+    set({ webview: "xhs" })
   },
 }))
