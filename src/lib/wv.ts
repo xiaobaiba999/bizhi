@@ -34,7 +34,7 @@ export function isAllowedWvHost(host: string): boolean {
 
 export interface WvSession {
   sid: string
-  /** 首次进入时锁定的主站（root 兜底代理的目标） */
+  /** 最近一次页面级导航的内嵌站点（root 兜底 / 登录回调救援的目标） */
   host: string
   /** 按源站域名隔离的 cookie jar：域名 → (name → value)，跨站互不污染 */
   jars: Map<string, Map<string, string>>
@@ -478,9 +478,49 @@ try{
 }
 
 /**
+ * 小红书登录页自动切扫码模式：
+ * 官方登录卡片默认展示「短信登录」，二维码藏在右上角的小图标后面，
+ * 这里在页面挂载后自动点一次角落切换图标，让扫码二维码直接显示。
+ * 仅在用户尚未交互时生效（点过/输入过就不再抢），且最多尝试一次。
+ */
+function buildXhsQrAutoSwitchScript(): string {
+  return `(function(){
+'use strict';
+var interacted=false;
+function mark(){interacted=true}
+document.addEventListener('click',mark,true);
+document.addEventListener('keydown',mark,true);
+var clicked=false;
+var n=0;
+var t=setInterval(function(){
+  n++;
+  if(clicked||interacted||n>75){clearInterval(t);return}
+  try{
+    var box=document.querySelector('.login-box-container')||document.querySelector('.sso-login-wrapper');
+    if(!box)return;
+    var phone=box.querySelector('input[type=tel],input[placeholder*="手机"],input[placeholder*="phone"],input[placeholder*="Phone"]');
+    if(!phone)return;
+    var br=box.getBoundingClientRect();
+    var imgs=box.querySelectorAll('img');
+    for(var i=0;i<imgs.length;i++){
+      var r=imgs[i].getBoundingClientRect();
+      if(r.width>=40&&r.width<=90&&Math.abs(r.right-br.right)<20&&Math.abs(r.top-br.top)<20){
+        clicked=true;
+        clearInterval(t);
+        imgs[i].click();
+        return;
+      }
+    }
+  }catch(e){}
+},200);
+})();`
+}
+
+/**
  * 重写内嵌 HTML：
  * 1. <head> 前注入 <base>（相对资源改道）与运行时补丁
  * 2. 资源属性补上 /wv 前缀：根路径相对地址 + 白名单域名的绝对地址 + srcset
+ * 3. 小红书页面追加「登录页自动切扫码」补丁
  */
 export function rewriteHtml(
   html: string,
@@ -489,9 +529,13 @@ export function rewriteHtml(
   cookies: Record<string, string>
 ): string {
   const prefix = `/wv/${host}`
+  const extra = host.toLowerCase().includes("xiaohongshu")
+    ? `<script>${buildXhsQrAutoSwitchScript()}</script>`
+    : ""
   const inject =
     `<base href="${prefix}${pathname}">` +
-    `<script>${buildPatchScript(host, cookies)}</script>`
+    `<script>${buildPatchScript(host, cookies)}</script>` +
+    extra
 
   let out = html
   if (/<head[^>]*>/i.test(out)) {
@@ -647,6 +691,8 @@ export async function proxyUpstream(
 
   // HTML：读出来重写（注入 base + 运行时补丁，改道资源地址）
   if (contentType.includes("text/html")) {
+    // 页面级导航：记录最近活跃站点（多站点共用会话时的救援兜底）
+    session.host = host
     const html = await upstream.text()
     const pathname = new URL(upstreamUrl).pathname
     const rewritten = rewriteHtml(html, host, pathname, pageCookieRecord(session, host))

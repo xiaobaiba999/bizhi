@@ -29,14 +29,19 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         {/*
           内嵌网页登录回调救援：登录 SDK 扫码确认后会把 iframe 跳到
           本应用根路径（/?ticket=…，service 为本地 origin 时）。
-          此脚本在应用渲染前检测「iframe 内 + 根路径 + 登录票据参数」，
-          查询 wv 会话主站后转回 /wv/<主站>/?ticket=… 完成登录。
+          此脚本在应用渲染前检测「iframe 内 + 根路径 + 查询参数」：
+          1. 优先从 document.referrer 还原发起跳转的内嵌站点（/wv/<host>），
+             小红书 / 夸克两个内嵌页各自跳回时都能路由到正确的主站；
+          2. 无 referer 时兜底查询 wv 会话主站。
+          转回 /wv/<host>/?ticket=… 完成票据交换与登录。
         */}
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){try{
 var q=location.search;
-if(window.self!==window.top&&location.pathname==='/'&&q&&/[?&](ticket|code|token|st|redirect)[=]/i.test(q)){
+if(window.self!==window.top&&location.pathname==='/'&&q){
+var m=/\\/wv\\/([^\\/?#]+)/.exec(document.referrer||'');
+if(m){location.replace('/wv/'+m[1]+'/'+q);return}
 document.documentElement.style.background='#fff';
 fetch('/api/wv-info',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
 if(d&&d.host){location.replace('/wv/'+d.host+'/'+q)}

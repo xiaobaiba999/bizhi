@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import {
   WV_SID_COOKIE,
+  createWvSession,
   getWvSession,
   isAllowedWvHost,
   proxyUpstream,
@@ -38,13 +39,27 @@ async function handle(req: NextRequest): Promise<Response> {
   }
 
   const session = getWvSession(req.cookies.get(WV_SID_COOKIE)?.value)
-  if (!session || !isAllowedWvHost(session.host)) {
+
+  // 优先从 Referer 还原发起请求的内嵌站点（/wv/<host>），
+  // 避免多站点共用一个会话时（小红书 + 夸克）路由到错误主站
+  let host: string | null = null
+  const referer = req.headers.get("referer") ?? ""
+  const refMatch = /^https?:\/\/[^/]+\/wv\/([^/?#]+)/i.exec(referer)
+  if (refMatch && isAllowedWvHost(refMatch[1])) {
+    host = refMatch[1].toLowerCase()
+  } else if (session && isAllowedWvHost(session.host)) {
+    host = session.host
+  }
+
+  if (!host) {
     return new NextResponse("Not Found", { status: 404 })
   }
 
-  const host = session.host
+  let activeSession = session
+  if (!activeSession) activeSession = createWvSession(host)
+
   try {
-    return await proxyUpstream(req, session, host, pathname.replace(/^\//, ""))
+    return await proxyUpstream(req, activeSession, host, pathname.replace(/^\//, ""))
   } catch (e) {
     console.error(`root wv fallback error (${host}${pathname}):`, e)
     return new NextResponse("Not Found", { status: 404 })
