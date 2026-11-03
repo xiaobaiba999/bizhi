@@ -3,7 +3,17 @@ export function SiteFooter() {
   return (
     <footer className="mt-auto border-t bg-background pb-[env(safe-area-inset-bottom)]">
       <div className="mx-auto flex w-full max-w-5xl flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-muted-foreground sm:flex-row sm:px-6">
-        <p>© 2026 壁纸工坊 · 小红书发布 · 夸克网盘</p>
+        <p>
+          © 2026 壁纸工坊 v1.0.10 · 壁纸来自
+          <a
+            href="https://haowallpaper.com"
+            target="_blank"
+            rel="noreferrer"
+            className="mx-1 font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+          >
+            哲风壁纸
+          </a>
+        </p>
         <p className="flex items-center gap-3">
           <span>壁纸协议</span>
           <span aria-hidden>·</span>

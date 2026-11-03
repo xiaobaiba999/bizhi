@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import fs from "fs"
 import path from "path"
 import { db } from "@/lib/db"
+import { isZhefengImageUrl, upstreamHeaders } from "@/lib/zhefeng"
 
 /** 夸克网盘容量（演示：10GB） */
 const TOTAL_BYTES = 10 * 1024 * 1024 * 1024
@@ -34,7 +35,7 @@ export async function GET() {
 /**
  * POST /api/cloud/files —— 保存壁纸 / 上传图片到网盘
  * body: { items: [{ name: string, src: string }] }
- * src 仅接受 /gallery/** 素材或 data:image/** 本地上传
+ * src 接受三类：/gallery/** 素材、data:image/** 本地上传、哲风壁纸 img.haowallpaper.com 直链
  */
 export async function POST(req: NextRequest) {
   try {
@@ -64,8 +65,21 @@ export async function POST(req: NextRequest) {
         const commaIdx = src.indexOf(",")
         if (commaIdx === -1) continue
         size = Math.round((src.length - commaIdx - 1) * 0.75)
+      } else if (isZhefengImageUrl(src)) {
+        // 哲风壁纸外链：回源 HEAD 获取真实大小，失败则按 2MB 估算
+        try {
+          const head = await fetch(src, {
+            method: "HEAD",
+            headers: upstreamHeaders(),
+            signal: AbortSignal.timeout(10000),
+          })
+          const len = Number(head.headers.get("content-length"))
+          size = Number.isFinite(len) && len > 0 ? len : 2 * 1024 * 1024
+        } catch {
+          size = 2 * 1024 * 1024
+        }
       } else {
-        // 仅允许上述两类来源
+        // 仅允许上述三类来源
         continue
       }
 

@@ -1,6 +1,7 @@
 "use client"
 
 import { AtSign, Bookmark, CalendarClock, Heart, MapPin, MessageCircle, Star } from "lucide-react"
+import { proxyImageUrl } from "@/lib/zhefeng"
 import { cn } from "@/lib/utils"
 import { DECLARATIONS } from "@/lib/publish-data"
 import { usePublishStore } from "@/lib/store"
@@ -36,7 +37,7 @@ export function PreviewCard() {
         {cover ? (
           <div className="relative">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={cover} alt="笔记封面预览" className="aspect-[3/4] w-full object-cover" />
+            <img src={proxyImageUrl(cover)} alt="笔记封面预览" className="aspect-[3/4] w-full object-cover" />
             {images.length > 1 && (
               <span className="absolute right-3 top-3 rounded-full bg-black/50 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur-sm">
                 1/{images.length}

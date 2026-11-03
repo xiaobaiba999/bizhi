@@ -1,6 +1,7 @@
 "use client"
 
 import { useRef, useState } from "react"
+import { proxyImageUrl } from "@/lib/zhefeng"
 import { motion } from "framer-motion"
 import { toast } from "sonner"
 import { ImagePlus, Sparkles, Star, Trash2, Upload, X } from "lucide-react"
@@ -134,7 +135,7 @@ export function StepImages() {
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={img.src}
+                    src={proxyImageUrl(img.src)}
                     alt={img.fileName ?? `已选图片 ${idx + 1}`}
                     className="size-24 object-cover sm:size-28"
                     draggable={false}
@@ -193,7 +194,7 @@ export function StepImages() {
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={p.src}
+                    src={proxyImageUrl(p.src)}
                     alt={p.label}
                     className="size-full object-cover transition-transform group-hover:scale-105"
                   />

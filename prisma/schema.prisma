@@ -37,3 +37,11 @@ model CloudFile {
   sharedAt  DateTime?
   createdAt DateTime  @default(now())
 }
+
+// 哲风壁纸登录令牌（仅保存在本地数据库，用于下载原图鉴权）
+model ZfToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  note      String   // 来源说明：manual(手动粘贴) | qrcode(扫码登录)
+  createdAt DateTime @default(now())
+}

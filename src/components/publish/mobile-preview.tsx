@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { proxyImageUrl } from "@/lib/zhefeng"
 import { ImageIcon, Smartphone, Star } from "lucide-react"
 import {
   Dialog,
@@ -40,7 +41,7 @@ export function MobilePreviewBar() {
           <span className="relative flex h-14 w-[52px] shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted">
             {cover ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={cover} alt="笔记封面缩略图" className="size-full object-cover" />
+              <img src={proxyImageUrl(cover)} alt="笔记封面缩略图" className="size-full object-cover" />
             ) : (
               <ImageIcon className="size-5 text-muted-foreground/40" />
             )}

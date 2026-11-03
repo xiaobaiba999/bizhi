@@ -26,6 +26,9 @@ export function SiteHeader() {
             壁
           </span>
           <span className="hidden text-base font-bold sm:inline">壁纸工坊</span>
+          <span className="hidden rounded-full border px-1.5 py-0.5 text-[9px] font-bold text-muted-foreground sm:inline">
+            v1.0.10
+          </span>
         </Link>
 
         <nav aria-label="主导航" className="ml-auto flex items-center gap-1 sm:gap-1.5">

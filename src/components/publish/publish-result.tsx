@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
+import { proxyImageUrl } from "@/lib/zhefeng"
 import { motion } from "framer-motion"
 import { toast } from "sonner"
 import {
@@ -56,7 +57,7 @@ export function PublishResult({ note }: { note: NoteRecord }) {
           <div className="relative shrink-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={note.images[0]}
+              src={proxyImageUrl(note.images[0])}
               alt={`${note.title} 封面`}
               className="size-24 rounded-xl object-cover sm:size-28"
             />
@@ -235,7 +236,7 @@ function PublishedList() {
             <div key={n.id} className="flex items-center gap-3 rounded-xl border bg-card p-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={n.images[0]}
+                src={proxyImageUrl(n.images[0])}
                 alt={`${n.title} 封面`}
                 className="size-16 shrink-0 rounded-lg object-cover"
               />

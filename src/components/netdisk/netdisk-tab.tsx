@@ -14,6 +14,7 @@ import {
   Upload,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { proxyImageUrl } from "@/lib/zhefeng"
 import { useAppStore } from "@/lib/app-store"
 import {
   Dialog,
@@ -267,7 +268,7 @@ export function NetdiskTab() {
               {/* 图标/缩略 */}
               {f.kind === "image" && f.src ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={f.src} alt={f.name} className="size-12 shrink-0 rounded-lg object-cover" />
+                <img src={f.src ? proxyImageUrl(f.src) : ""} alt={f.name} className="size-12 shrink-0 rounded-lg object-cover" />
               ) : (
                 <span className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-muted">
                   <Archive className="size-5 text-muted-foreground" />
