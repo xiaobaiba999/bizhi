@@ -5,13 +5,14 @@ import { motion, AnimatePresence } from "framer-motion"
 import { toast } from "sonner"
 import {
   Check,
-  CloudUpload,
   Download,
+  EyeOff,
   Expand,
   KeyRound,
   RefreshCw,
   Send,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -35,21 +36,16 @@ interface ListState {
 
 const INITIAL: ListState = { items: [], page: 0, hasMore: true, loading: false, error: null }
 
-/** 下载原图代理链接 */
+/** 下载原图代理链接（带 wtId：有令牌时走官网原图直链） */
 function downloadUrl(w: ZhefengWallpaper) {
-  return `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(w.title)}`
-}
-
-/** 文件扩展名（从直链推断） */
-function extOf(src: string) {
-  const dot = src.lastIndexOf(".")
-  const e = dot === -1 ? "" : src.slice(dot + 1).toLowerCase()
-  return /^\w{2,5}$/.test(e) ? e : "png"
+  return `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
+    w.title
+  )}&wtId=${encodeURIComponent(w.id)}`
 }
 
 /**
  * 壁纸工坊主界面：壁纸数据实时来自哲风壁纸（haowallpaper.com）。
- * 分类切换 + 无限滚动 + 多选联动（发布到小红书 / 备份到夸克网盘）。
+ * 分类切换 + 无限滚动 + 已下载自动隐藏 + 多选联动（发布小红书 / 批量下载）。
  */
 export function WorkshopTab() {
   const [catKey, setCatKey] = useState("recommend")
@@ -58,8 +54,10 @@ export function WorkshopTab() {
   const [selected, setSelected] = useState<ZhefengWallpaper[]>([])
   const [preview, setPreview] = useState<ZhefengWallpaper | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
   const [tokenOpen, setTokenOpen] = useState(false)
+  /** 下载过的图片不再显示（默认开启，可临时关闭查看） */
+  const [hideDownloaded, setHideDownloaded] = useState(true)
+  const [downloadedCount, setDownloadedCount] = useState(0)
 
   const goPublish = useAppStore((s) => s.goPublish)
 
@@ -69,7 +67,7 @@ export function WorkshopTab() {
 
   const cat = ZHEFENG_CATEGORIES.find((c) => c.key === catKey) ?? ZHEFENG_CATEGORIES[0]
 
-  /** 拉取下一页壁纸（loading/hasMore 守卫 + seq 防过期响应） */
+  /** 拉取下一页壁纸（loading/hasMore 守卫 + seq 防过期响应 + 追加去重） */
   const loadMore = useCallback(async () => {
     if (list.loading || !list.hasMore || list.page === 0) return
     const seq = ++seqRef.current
@@ -77,42 +75,52 @@ export function WorkshopTab() {
 
     try {
       const nextPage = list.page + 1
-      const res = await fetch(`/api/wallpapers?cat=${catKey}&page=${nextPage}`, {
-        cache: "no-store",
-      })
+      const res = await fetch(
+        `/api/wallpapers?cat=${catKey}&page=${nextPage}&hideDownloaded=${hideDownloaded ? 1 : 0}`,
+        { cache: "no-store" }
+      )
       if (!res.ok) {
         const msg = await res.json().catch(() => null)
         throw new Error(msg?.error ?? "抓取失败")
       }
-      const data: { items: ZhefengWallpaper[]; hasMore: boolean } = await res.json()
+      const data: { items: ZhefengWallpaper[]; hasMore: boolean; downloadedCount?: number } =
+        await res.json()
       if (seq !== seqRef.current) return
 
-      setList((s) => ({
-        items: [...s.items, ...data.items],
-        page: nextPage,
-        hasMore: data.hasMore && data.items.length > 0,
-        loading: false,
-        error: null,
-      }))
+      setList((s) => {
+        const known = new Set(s.items.map((i) => i.id))
+        return {
+          items: [...s.items, ...data.items.filter((i) => !known.has(i.id))],
+          page: nextPage,
+          hasMore: data.hasMore && data.items.length > 0,
+          loading: false,
+          error: null,
+        }
+      })
+      if (typeof data.downloadedCount === "number") setDownloadedCount(data.downloadedCount)
     } catch (e) {
       if (seq !== seqRef.current) return
       setList((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : "抓取失败" }))
     }
-  }, [catKey, list.page, list.loading, list.hasMore])
+  }, [catKey, list.page, list.loading, list.hasMore, hideDownloaded])
 
-  // 切换分类 / 手动重试时重置列表并重新抓取第一页
+  // 切换分类 / 手动重试 / 切换「隐藏已下载」时重置列表并重新抓取第一页
   useEffect(() => {
     seqRef.current++
-    setList(INITIAL)
     const seq = seqRef.current
+    setList(INITIAL)
     ;(async () => {
       try {
-        const res = await fetch(`/api/wallpapers?cat=${catKey}&page=1`, { cache: "no-store" })
+        const res = await fetch(
+          `/api/wallpapers?cat=${catKey}&page=1&hideDownloaded=${hideDownloaded ? 1 : 0}`,
+          { cache: "no-store" }
+        )
         if (!res.ok) {
           const msg = await res.json().catch(() => null)
           throw new Error(msg?.error ?? "抓取失败")
         }
-        const data: { items: ZhefengWallpaper[]; hasMore: boolean } = await res.json()
+        const data: { items: ZhefengWallpaper[]; hasMore: boolean; downloadedCount?: number } =
+          await res.json()
         if (seq !== seqRef.current) return
         setList({
           items: data.items,
@@ -121,6 +129,7 @@ export function WorkshopTab() {
           loading: false,
           error: null,
         })
+        if (typeof data.downloadedCount === "number") setDownloadedCount(data.downloadedCount)
       } catch (e) {
         if (seq !== seqRef.current) return
         setList({
@@ -132,7 +141,7 @@ export function WorkshopTab() {
         })
       }
     })()
-  }, [catKey, reloadNonce])
+  }, [catKey, reloadNonce, hideDownloaded])
 
   // 无限滚动：哨兵进入可视区即加载下一页
   useEffect(() => {
@@ -162,31 +171,48 @@ export function WorkshopTab() {
 
   const publishSelected = () => {
     goPublish(selected.map((w) => w.src))
-    toast.success(`已载入 ${selected.length} 张壁纸，继续完成文案即可发布`)
+    toast.success(`已暂存 ${selected.length} 张壁纸，去小红书创作者中心发布吧`)
   }
 
-  const saveToNetdisk = async () => {
-    if (saving) return
-    setSaving(true)
+  /** 触发一个下载（隐藏 iframe 导航方式，不弹新页） */
+  const triggerDownload = (w: ZhefengWallpaper) => {
+    const frame = document.createElement("iframe")
+    frame.style.display = "none"
+    frame.src = downloadUrl(w)
+    document.body.appendChild(frame)
+    setTimeout(() => frame.remove(), 120000)
+  }
+
+  /** 批量下载选中壁纸 */
+  const batchDownload = () => {
+    if (selected.length === 0) return
+    selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 400))
+    toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`)
+    // 乐观移除：稍后刷新列表让服务端记录生效
+    const ids = new Set(selected.map((w) => w.id))
+    setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
+    setSelected([])
+    if (hideDownloaded) setTimeout(() => setReloadNonce((n) => n + 1), 8000)
+  }
+
+  /** 单张下载：乐观移除（hideDownloaded 开启时） */
+  const onDownloadOne = (w: ZhefengWallpaper) => {
+    toast.success(`开始下载「${w.title}」，下载过的壁纸之后不再显示`)
+    if (hideDownloaded) {
+      setList((s) => ({ ...s, items: s.items.filter((i) => i.id !== w.id) }))
+      setDownloadedCount((n) => n + 1)
+    }
+  }
+
+  /** 清空下载记录（被隐藏的壁纸重新显示） */
+  const clearDownloads = async () => {
     try {
-      const res = await fetch("/api/cloud/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: selected.map((w) => ({ name: `${w.title}.${extOf(w.src)}`, src: w.src })),
-        }),
-      })
-      if (!res.ok) {
-        const msg = await res.json().catch(() => null)
-        throw new Error(msg?.error ?? "保存失败")
-      }
-      const { saved } = await res.json()
-      toast.success(`已保存 ${saved} 张壁纸到夸克网盘`)
-      setSelected([])
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "保存到网盘失败")
-    } finally {
-      setSaving(false)
+      const res = await fetch("/api/wallpapers/downloads", { method: "DELETE" })
+      if (!res.ok) throw new Error()
+      toast.success("下载记录已清空，所有壁纸恢复显示")
+      setReloadNonce((n) => n + 1)
+    } catch {
+      toast.error("清空下载记录失败")
     }
   }
 
@@ -222,30 +248,61 @@ export function WorkshopTab() {
           >
             哲风壁纸
           </a>
-          ，支持下载原图、发布小红书、备份夸克网盘
+          ，下载原图、发布小红书，下载过的自动隐藏
         </p>
       </div>
 
-      {/* 分类筛选（容器内吸顶） */}
+      {/* 分类筛选 + 已下载过滤（容器内吸顶） */}
       <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 pb-2 pt-1 backdrop-blur-sm">
-        <div className="custom-scrollbar flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label="壁纸分类">
-          {ZHEFENG_CATEGORIES.map((c) => (
+        <div className="flex items-center gap-2">
+          <div className="custom-scrollbar flex flex-1 gap-2 overflow-x-auto pb-1" role="tablist" aria-label="壁纸分类">
+            {ZHEFENG_CATEGORIES.map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                role="tab"
+                aria-selected={catKey === c.key}
+                onClick={() => setCatKey(c.key)}
+                className={cn(
+                  "shrink-0 rounded-full border px-4 py-1.5 text-xs font-semibold transition-all",
+                  catKey === c.key
+                    ? "border-primary bg-primary text-primary-foreground shadow-md shadow-primary/20"
+                    : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                )}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
+
+          {/* 已下载过滤开关 */}
+          <div className="flex shrink-0 flex-col items-end gap-0.5 pb-1">
             <button
-              key={c.key}
               type="button"
-              role="tab"
-              aria-selected={catKey === c.key}
-              onClick={() => setCatKey(c.key)}
+              role="switch"
+              aria-checked={hideDownloaded}
+              onClick={() => setHideDownloaded((v) => !v)}
               className={cn(
-                "shrink-0 rounded-full border px-4 py-1.5 text-xs font-semibold transition-all",
-                catKey === c.key
-                  ? "border-primary bg-primary text-primary-foreground shadow-md shadow-primary/20"
-                  : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold transition-colors",
+                hideDownloaded
+                  ? "border-primary/50 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:text-foreground"
               )}
             >
-              {c.name}
+              <EyeOff className="size-3" />
+              隐藏已下载{downloadedCount > 0 && `（${downloadedCount}）`}
             </button>
-          ))}
+            {hideDownloaded && downloadedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void clearDownloads()}
+                className="inline-flex h-5.5 items-center gap-0.5 rounded-full px-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:text-destructive"
+              >
+                <Trash2 className="size-2.5" />
+                清空记录
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -279,8 +336,20 @@ export function WorkshopTab() {
             </button>
           </div>
         ) : list.items.length === 0 ? (
-          <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">
-            这个分类暂时没有壁纸
+          <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-center">
+            <p className="text-sm text-muted-foreground">
+              {hideDownloaded && downloadedCount > 0 ? "这一页的壁纸都下载过了" : "这个分类暂时没有壁纸"}
+            </p>
+            {hideDownloaded && downloadedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setHideDownloaded(false)}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors hover:bg-muted"
+              >
+                <EyeOff className="size-3.5" />
+                显示已下载的壁纸
+              </button>
+            )}
           </div>
         ) : (
           <div className={cn("grid gap-3", isPhone ? "grid-cols-2 sm:grid-cols-4 lg:grid-cols-5" : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3")}>
@@ -362,7 +431,10 @@ export function WorkshopTab() {
                       tabIndex={-1}
                       aria-label={`下载原图 ${w.title}`}
                       href={downloadUrl(w)}
-                      onClick={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onDownloadOne(w)
+                      }}
                       className="flex size-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform hover:scale-110"
                     >
                       <Download className="size-3.5" />
@@ -423,16 +495,11 @@ export function WorkshopTab() {
             </button>
             <button
               type="button"
-              disabled={saving}
-              onClick={() => void saveToNetdisk()}
-              className="inline-flex h-9 items-center gap-1.5 rounded-full border-2 border-primary/60 px-4 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95 disabled:opacity-50 sm:px-5"
+              onClick={batchDownload}
+              className="inline-flex h-9 items-center gap-1.5 rounded-full border-2 border-primary/60 px-4 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95 sm:px-5"
             >
-              {saving ? (
-                <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-              ) : (
-                <CloudUpload className="size-3.5" />
-              )}
-              存到夸克网盘
+              <Download className="size-3.5" />
+              批量下载
             </button>
             <button
               type="button"
@@ -462,28 +529,18 @@ export function WorkshopTab() {
         onPublish={(w) => {
           goPublish([w.src])
           setPreview(null)
-          toast.success("已载入壁纸，去完成文案发布吧")
+          toast.success("已暂存壁纸，去小红书创作者中心发布吧")
         }}
-        onSave={async (w) => {
-          try {
-            const res = await fetch("/api/cloud/files", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ items: [{ name: `${w.title}.${extOf(w.src)}`, src: w.src }] }),
-            })
-            if (!res.ok) throw new Error()
-            toast.success(`已把「${w.title}」存入夸克网盘`)
-            setPreview(null)
-          } catch {
-            toast.error("保存到网盘失败")
-          }
+        onDownloaded={(w) => {
+          onDownloadOne(w)
+          setPreview(null)
         }}
       />
     </section>
   )
 }
 
-/** 壁纸大图预览：原图查看 / 下载 / 选择 / 发布 / 存网盘 */
+/** 壁纸大图预览：原图查看 / 下载 / 选择 / 发布 */
 function WallpaperPreviewDialog({
   wallpaper,
   imgLoading,
@@ -491,7 +548,7 @@ function WallpaperPreviewDialog({
   onClose,
   onToggle,
   onPublish,
-  onSave,
+  onDownloaded,
 }: {
   wallpaper: ZhefengWallpaper | null
   imgLoading: boolean
@@ -499,7 +556,7 @@ function WallpaperPreviewDialog({
   onClose: () => void
   onToggle: (w: ZhefengWallpaper) => void
   onPublish: (w: ZhefengWallpaper) => void
-  onSave: (w: ZhefengWallpaper) => Promise<void>
+  onDownloaded: (w: ZhefengWallpaper) => void
 }) {
   return (
     <Dialog open={!!wallpaper} onOpenChange={(open) => !open && onClose()}>
@@ -544,10 +601,11 @@ function WallpaperPreviewDialog({
                   ))}
                 </div>
               )}
-              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="mt-4 grid grid-cols-3 gap-2">
                 <a
                   href={downloadUrl(wallpaper)}
-                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border text-xs font-semibold transition-colors hover:bg-muted"
+                  onClick={() => onDownloaded(wallpaper)}
+                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-primary text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95"
                 >
                   <Download className="size-3.5" />
                   下载原图
@@ -563,20 +621,15 @@ function WallpaperPreviewDialog({
                 <button
                   type="button"
                   onClick={() => onPublish(wallpaper)}
-                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-primary text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95"
+                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border-2 border-primary/60 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95"
                 >
                   <Send className="size-3.5" />
                   去发布
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void onSave(wallpaper)}
-                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border-2 border-primary/60 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95"
-                >
-                  <CloudUpload className="size-3.5" />
-                  存网盘
-                </button>
               </div>
+              <p className="mt-2.5 text-center text-[10px] text-muted-foreground">
+                已配置令牌时下载与官网分辨率、文件大小完全一致；下载过的壁纸之后不再显示
+              </p>
             </div>
           </>
         )}

@@ -45,3 +45,13 @@ model ZfToken {
   note      String   // 来源说明：manual(手动粘贴) | qrcode(扫码登录)
   createdAt DateTime @default(now())
 }
+
+// 已下载壁纸记录（下载过的图片不再出现在壁纸列表中）
+model Download {
+  id           String   @id @default(cuid())
+  wtId         String   @unique // 哲风壁纸图片 id（CDN 文件名去扩展名）
+  title        String
+  src          String
+  quality      String   @default("preview") // preview(预览质量) | original(令牌高清原图)
+  downloadedAt DateTime @default(now())
+}

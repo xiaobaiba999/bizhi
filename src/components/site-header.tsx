@@ -1,22 +1,21 @@
 "use client"
 
 import Link from "next/link"
-import { CloudUpload, ImageIcon, Send } from "lucide-react"
+import { Cloud, ImageIcon, Send } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAppStore, type AppTab } from "@/lib/app-store"
-import { usePublishStore } from "@/lib/store"
 
 const TABS: { key: AppTab; label: string; icon: React.ReactNode }[] = [
   { key: "workshop", label: "壁纸工坊", icon: <ImageIcon className="size-3.5" /> },
-  { key: "publish", label: "小红书发布", icon: <Send className="size-3.5" /> },
-  { key: "netdisk", label: "夸克网盘", icon: <CloudUpload className="size-3.5" /> },
+  { key: "publish", label: "小红书", icon: <Send className="size-3.5" /> },
 ]
 
-/** 顶部导航：壁纸工坊 · 三大功能页签 */
+/** 顶部导航：壁纸工坊 / 小红书页签 + 夸克网盘入口（最右上角，调起内嵌原网页） */
 export function SiteHeader() {
   const tab = useAppStore((s) => s.tab)
   const setTab = useAppStore((s) => s.setTab)
-  const imageCount = usePublishStore((s) => s.images.length)
+  const netdiskOpen = useAppStore((s) => s.netdiskOpen)
+  const setNetdiskOpen = useAppStore((s) => s.setNetdiskOpen)
 
   return (
     <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur-md">
@@ -48,23 +47,24 @@ export function SiteHeader() {
                 )}
               >
                 {t.icon}
-                <span className={cn(t.key === "publish" && "hidden xs:inline sm:inline")}>
-                  {t.label}
-                </span>
-                {t.key === "publish" && imageCount > 0 && !active && (
-                  <span className="absolute -right-0.5 -top-0.5 flex size-4 items-center justify-center rounded-full bg-primary text-[9px] font-bold text-primary-foreground">
-                    {imageCount}
-                  </span>
-                )}
+                <span>{t.label}</span>
               </button>
             )
           })}
-          <span
-            aria-hidden
-            className="ml-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground"
+
+          {/* 夸克网盘入口：最右上角，调起内嵌原网页窗口 */}
+          <button
+            type="button"
+            aria-pressed={netdiskOpen}
+            onClick={() => setNetdiskOpen(true)}
+            className={cn(
+              "ml-1.5 inline-flex h-9 items-center gap-1.5 rounded-full border-2 border-primary/50 bg-primary/10 px-3 text-xs font-bold text-primary transition-all hover:bg-primary/15 active:scale-95 sm:px-4 sm:text-sm",
+              netdiskOpen && "bg-primary text-primary-foreground shadow-md shadow-primary/20"
+            )}
           >
-            壁
-          </span>
+            <Cloud className="size-4" />
+            <span className="hidden xs:inline sm:inline">夸克网盘</span>
+          </button>
         </nav>
       </div>
     </header>

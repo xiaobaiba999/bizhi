@@ -1,12 +1,12 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 import {
   ExternalLink,
-  Globe,
   KeyRound,
   QrCode,
+  RefreshCw,
   ShieldCheck,
   Trash2,
   ClipboardPaste,
@@ -27,35 +27,20 @@ interface TokenState {
   createdAt: string | null
 }
 
-/** 二维码占位图案（确定性伪随机方块，模拟等待扫码态） */
-function QrPlaceholder({ expired }: { expired: boolean }) {
-  const cells = Array.from({ length: 49 }, (_, i) => {
-    const v = Math.sin(i * 99.73) * 10000
-    return (v - Math.floor(v)) > 0.52
-  })
-  return (
-    <div className={cn("relative grid aspect-square w-full grid-cols-7 gap-1 p-4 transition-opacity", expired && "opacity-25")}>
-      {cells.map((on, i) => (
-        <span
-          key={i}
-          className={cn("rounded-[2px]", on ? "bg-neutral-900" : "bg-transparent")}
-        />
-      ))}
-      <span className="absolute inset-0 flex items-center justify-center">
-        <span className={cn(
-          "flex size-10 items-center justify-center rounded-full bg-white shadow-lg",
-          expired ? "text-neutral-400" : "text-primary"
-        )}>
-          <span className={cn("size-5 rounded-full border-2 border-primary/30 border-t-primary", !expired && "animate-spin")} />
-        </span>
-      </span>
-    </div>
-  )
+interface QrSession {
+  state: string
+  qrUrl: string
 }
 
+type QrPhase = "loading" | "waiting" | "ok" | "expired" | "error"
+
+const QR_TTL = 120
+
 /**
- * 登录令牌设置（还原壁纸工坊 1.0.x 交互）：
- * 令牌用于从哲风壁纸下载原图（与官网分辨率、文件大小完全一致），仅保存在本地数据库。
+ * 登录令牌设置：
+ * - 扫码登录：内嵌哲风壁纸同款「微信开放平台扫码二维码」，扫码确认后令牌自动入库
+ * - 手动粘贴：从官网浏览器开发者工具复制令牌
+ * 令牌用于下载原图（与官网分辨率、文件大小完全一致），仅保存在本地数据库。
  */
 export function TokenSettingsDialog({
   open,
@@ -68,7 +53,12 @@ export function TokenSettingsDialog({
   const [mode, setMode] = useState<"qrcode" | "manual">("qrcode")
   const [manualInput, setManualInput] = useState("")
   const [saving, setSaving] = useState(false)
-  const [countdown, setCountdown] = useState(120)
+
+  // 扫码会话
+  const [qr, setQr] = useState<QrSession | null>(null)
+  const [phase, setPhase] = useState<QrPhase>("loading")
+  const [countdown, setCountdown] = useState(QR_TTL)
+  const [qrNonce, setQrNonce] = useState(0)
 
   const refresh = useCallback(async () => {
     try {
@@ -79,7 +69,7 @@ export function TokenSettingsDialog({
     }
   }, [])
 
-  // 打开时拉取令牌状态并重置输入（微任务中执行，避免 effect 内同步 setState）
+  // 打开时重置 + 拉取令牌状态（微任务中执行，避免 effect 内同步 setState）
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -88,34 +78,88 @@ export function TokenSettingsDialog({
       void refresh()
       setMode("qrcode")
       setManualInput("")
-      setCountdown(120)
+      setQr(null)
+      setPhase("loading")
+      setCountdown(QR_TTL)
     })
     return () => {
       cancelled = true
     }
   }, [open, refresh])
 
-  // 二维码倒计时（每秒递减，到 0 停止）
+  // 发起扫码会话（打开弹窗 / 点击刷新时；微任务中执行，避免 effect 内同步 setState）
   useEffect(() => {
     if (!open || mode !== "qrcode") return
-    const t = setInterval(() => {
-      setCountdown((c) => (c > 0 ? c - 1 : 0))
-    }, 1000)
-    return () => clearInterval(t)
-  }, [open, mode])
-
-  // 令牌状态轮询（扫码确认后服务端会出现令牌）
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  useEffect(() => {
-    if (!open) {
-      if (pollRef.current) clearInterval(pollRef.current)
-      return
-    }
-    pollRef.current = setInterval(() => void refresh(), 5000)
+    let cancelled = false
+    Promise.resolve().then(() => {
+      if (cancelled) return
+      setPhase("loading")
+      setCountdown(QR_TTL)
+      void (async () => {
+        try {
+          const res = await fetch("/api/zf-login", { method: "POST" })
+          if (!res.ok) throw new Error()
+          const data: QrSession = await res.json()
+          if (cancelled) return
+          setQr(data)
+          setPhase("waiting")
+        } catch {
+          if (!cancelled) setPhase("error")
+        }
+      })()
+    })
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current)
+      cancelled = true
     }
-  }, [open, refresh])
+  }, [open, mode, qrNonce])
+
+  // 倒计时
+  useEffect(() => {
+    if (!open || mode !== "qrcode" || phase !== "waiting") return
+    const t = setInterval(() => setCountdown((c) => (c > 0 ? c - 1 : 0)), 1000)
+    return () => clearInterval(t)
+  }, [open, mode, phase])
+
+  // 轮询扫码状态（服务端代查哲风接口）
+  useEffect(() => {
+    if (!open || mode !== "qrcode" || phase !== "waiting" || !qr) return
+    let stopped = false
+    const timer = setInterval(
+      () => {
+        if (stopped) return
+        void (async () => {
+          try {
+            const res = await fetch(`/api/zf-login?state=${encodeURIComponent(qr.state)}`, {
+              cache: "no-store",
+            })
+            const data = await res.json().catch(() => null)
+            if (stopped || !data) return
+            if (data.status === "ok") {
+              stopped = true
+              setPhase("ok")
+              toast.success("扫码登录成功，令牌已自动保存")
+              void refresh()
+            } else if (data.status === "expired") {
+              stopped = true
+              setPhase("expired")
+            }
+            // pending / error → 继续轮询
+          } catch {
+            /* 网络抖动继续轮询 */
+          }
+        })()
+      },
+      2000
+    )
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [open, mode, phase, qr, refresh])
+
+  const regenQr = () => {
+    setQrNonce((n) => n + 1)
+  }
 
   const saveToken = async (token: string, source: "manual" | "qrcode") => {
     setSaving(true)
@@ -147,7 +191,7 @@ export function TokenSettingsDialog({
     }
   }
 
-  const expired = countdown <= 0
+  const expired = countdown <= 0 && phase === "waiting"
   const mm = Math.floor(countdown / 60)
   const ss = String(countdown % 60).padStart(2, "0")
 
@@ -176,13 +220,14 @@ export function TokenSettingsDialog({
                 <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
                   {state.token}
                 </span>
-                <span className="ml-auto inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
-                  <Globe className="size-3" />
-                  浏览器直连
-                </span>
+                {state.source === "qrcode" && (
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
+                    扫码登录
+                  </span>
+                )}
               </div>
               <p className="mt-1.5 pl-7 text-[11px] leading-relaxed text-muted-foreground">
-                下载原图时由浏览器直连源站获取直链（令牌绑定了登录 IP）
+                下载原图时自动使用令牌获取与官网完全一致的原图
               </p>
               <div className="mt-2.5 pl-7">
                 <Button
@@ -238,39 +283,84 @@ export function TokenSettingsDialog({
 
           {mode === "qrcode" ? (
             <div className="rounded-2xl border p-4">
-              <div className="mx-auto max-w-[220px]">
-                <QrPlaceholder expired={expired} />
-              </div>
-              <p className="text-center text-sm font-bold">{expired ? "二维码已过期" : "等待响应中～"}</p>
-              <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-                <span className="size-1.5 rounded-full bg-primary" />
-                请用微信扫一扫，并在手机上确认
-                <span className="text-[10px]">（{mm}:{ss} 后过期）</span>
-              </p>
-              <p className="mt-1.5 text-center text-[10px] text-muted-foreground">
-                扫码即代表同意
-                <a
-                  href="https://haowallpaper.com"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mx-0.5 inline-flex items-center gap-0.5 font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
-                >
-                  haowallpaper.com
-                  <ExternalLink className="size-2.5" />
-                </a>
-                的微信授权登录
-              </p>
-              {expired && (
-                <div className="mt-3 text-center">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCountdown(120)}
-                    className="h-7 text-xs"
-                  >
-                    刷新二维码
+              {/* 真实微信开放平台扫码二维码（与哲风壁纸官网登录参数一致） */}
+              {phase === "ok" ? (
+                <div className="flex flex-col items-center gap-3 py-6">
+                  <span className="flex size-16 items-center justify-center rounded-full bg-primary/10">
+                    <ShieldCheck className="size-8 text-primary" />
+                  </span>
+                  <p className="text-sm font-bold">扫码登录成功</p>
+                  <p className="text-xs text-muted-foreground">令牌已自动保存，下载原图已解锁高清原图</p>
+                </div>
+              ) : phase === "loading" ? (
+                <div className="flex aspect-square w-full max-w-[220px] items-center justify-center rounded-2xl bg-muted/50">
+                  <span className="size-8 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+                </div>
+              ) : phase === "error" ? (
+                <div className="flex flex-col items-center gap-3 py-6">
+                  <p className="text-sm font-semibold text-destructive">二维码生成失败</p>
+                  <Button variant="outline" size="sm" onClick={regenQr} className="h-8 text-xs">
+                    <RefreshCw className="size-3.5" />
+                    重新生成
                   </Button>
                 </div>
+              ) : (
+                <div className="relative mx-auto max-w-[220px]">
+                  <div
+                    className={cn(
+                      "overflow-hidden rounded-2xl border-4 border-neutral-100 bg-white transition-opacity",
+                      (expired || phase === "expired") && "opacity-25"
+                    )}
+                  >
+                    <iframe
+                      key={qr?.state ?? "qr"}
+                      src={qr?.qrUrl ?? "about:blank"}
+                      title="哲风壁纸微信扫码登录二维码"
+                      width="220"
+                      height="220"
+                      scrolling="no"
+                      frameBorder={0}
+                      className="block h-[220px] w-full"
+                    />
+                  </div>
+                  {(expired || phase === "expired") && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-2xl bg-background/60 backdrop-blur-[2px]">
+                      <p className="text-sm font-bold">二维码已过期</p>
+                      <Button variant="outline" size="sm" onClick={regenQr} className="h-8 text-xs">
+                        <RefreshCw className="size-3.5" />
+                        刷新二维码
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {phase !== "ok" && phase !== "error" && (
+                <>
+                  <p className="mt-3 text-center text-sm font-bold">
+                    {phase === "loading" ? "二维码生成中…" : expired || phase === "expired" ? "二维码已过期" : "等待扫码中～"}
+                  </p>
+                  <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+                    <span className="size-1.5 rounded-full bg-primary" />
+                    请用微信扫一扫，并在手机上确认
+                    {phase === "waiting" && !expired && (
+                      <span className="text-[10px]">（{mm}:{ss} 后过期）</span>
+                    )}
+                  </p>
+                  <p className="mt-1.5 text-center text-[10px] text-muted-foreground">
+                    扫码即代表同意
+                    <a
+                      href="https://haowallpaper.com"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mx-0.5 inline-flex items-center gap-0.5 font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+                    >
+                      haowallpaper.com
+                      <ExternalLink className="size-2.5" />
+                    </a>
+                    的微信授权登录
+                  </p>
+                </>
               )}
             </div>
           ) : (
