@@ -1,0 +1,27 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 发布笔记（图片、文案、自主声明、添加组件等均为发布时可选内容）
+model Note {
+  id            String    @id @default(cuid())
+  title         String    // 标题（≤20字）
+  body          String    // 正文文案
+  images        String    // JSON 字符串数组：图片 src 列表（首张为封面）
+  declaration   String?   // 自主声明：fiction | brand | repost | null(无)
+  location      String?   // 添加组件-位置
+  topics        String?   // 添加组件-话题 JSON 数组
+  mentions      String?   // 添加组件-@提及 JSON 数组
+  collection    String?   // 添加组件-合集
+  visibility    String    @default("public") // public | fans | friends | private
+  allowComments Boolean   @default(true)
+  scheduledAt   DateTime? // 添加组件-定时发布时间
+  status        String    @default("published") // published | scheduled
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}

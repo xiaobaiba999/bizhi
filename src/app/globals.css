@@ -1,0 +1,123 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --radius: 0.625rem;
+  /* 小红书品牌红 */
+  --primary: #ff2442;
+  --primary-foreground: #ffffff;
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
+  --popover: #ffffff;
+  --popover-foreground: #1a1a1a;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #1a1a1a;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --accent: #fff0f2;
+  --accent-foreground: #ff2442;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #ff2442;
+  --chart-1: #ff2442;
+  --chart-2: #ff8200;
+  --chart-3: #f7b500;
+  --chart-4: #00c18c;
+  --chart-5: #4f46e5;
+}
+
+.dark {
+  --primary: #ff2442;
+  --primary-foreground: #ffffff;
+  --background: #111113;
+  --foreground: #f5f5f5;
+  --card: #1a1a1c;
+  --card-foreground: #f5f5f5;
+  --popover: #1a1a1c;
+  --popover-foreground: #f5f5f5;
+  --secondary: #262628;
+  --secondary-foreground: #f5f5f5;
+  --muted: #262628;
+  --muted-foreground: #a3a3a3;
+  --accent: #2a1418;
+  --accent-foreground: #ff5f75;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #2e2e30;
+  --input: #2e2e30;
+  --ring: #ff2442;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans), "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+}
+
+/* 自定义细滚动条 */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #d4d4d4;
+  border-radius: 999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #a3a3a3;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 图片拖拽排序时的投影 */
+.dragging-image {
+  @apply opacity-60 ring-2 ring-primary scale-95;
+}
+
+textarea {
+  field-sizing: content;
+}
