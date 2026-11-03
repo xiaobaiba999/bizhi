@@ -25,3 +25,15 @@ model Note {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
+
+// 夸克网盘：云文件（壁纸保存 / 本地上传）
+model CloudFile {
+  id        String    @id @default(cuid())
+  name      String    // 文件名（含扩展名）
+  src       String?   // 预览地址：/gallery/** 或 data:image/**；归档类为 null
+  kind      String    @default("image") // image | archive
+  size      Int       // 字节数
+  shareCode String?   // 分享码（生成后可复制 pan.quark.cn/s/xxx）
+  sharedAt  DateTime?
+  createdAt DateTime  @default(now())
+}

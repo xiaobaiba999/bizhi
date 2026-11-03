@@ -27,12 +27,6 @@ export type Visibility = "public" | "fans" | "friends" | "private"
 /** 添加组件：可用挂件类型 */
 export type ComponentKind = "location" | "topics" | "mentions" | "collection" | "schedule"
 
-export interface GalleryPhoto {
-  src: string
-  label: string
-  tag: string
-}
-
 export interface TopicMeta {
   name: string
   hot: number

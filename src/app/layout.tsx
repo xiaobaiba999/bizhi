@@ -14,8 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "小红书创作中心 · 发布笔记",
-  description: "三步发布小红书图文笔记：选择图片、完成文案、可选的自主声明与添加组件",
+  title: "壁纸工坊 · 小红书发布 · 夸克网盘",
+  description:
+    "壁纸工坊：精选高清壁纸，一键发布小红书图文笔记（声明与组件可选），并支持夸克网盘云备份与分享",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -1,27 +1,18 @@
 import type {
   DeclarationMeta,
   FriendMeta,
-  GalleryPhoto,
   LocationMeta,
   TopicMeta,
   Visibility,
 } from "./types"
+import { WALLPAPERS } from "./wallpapers"
 
-/** 相册素材（public/gallery 下的示例图） */
-export const GALLERY_PHOTOS: GalleryPhoto[] = [
-  { src: "/gallery/photo-1.svg", label: "Brunch 日记", tag: "咖啡" },
-  { src: "/gallery/photo-2.svg", label: "可颂与拿铁", tag: "美食" },
-  { src: "/gallery/photo-3.svg", label: "抹茶甜品局", tag: "探店" },
-  { src: "/gallery/photo-4.svg", label: "山野治愈系", tag: "旅行" },
-  { src: "/gallery/photo-5.svg", label: "海边日落", tag: "旅行" },
-  { src: "/gallery/photo-6.svg", label: "秋冬穿搭", tag: "穿搭" },
-  { src: "/gallery/photo-7.svg", label: "遛狗日常", tag: "宠物" },
-  { src: "/gallery/photo-8.svg", label: "绿植角落", tag: "家居" },
-  { src: "/gallery/photo-9.svg", label: "护肤分享", tag: "美妆" },
-  { src: "/gallery/photo-10.svg", label: "深夜食堂", tag: "美食" },
-  { src: "/gallery/photo-11.svg", label: "桌面改造", tag: "好物" },
-  { src: "/gallery/photo-12.svg", label: "秋日街头", tag: "城市" },
-]
+/** 相册素材（与壁纸工坊同一素材库，共用 public/gallery） */
+export const GALLERY_PHOTOS = WALLPAPERS.map((w) => ({
+  src: w.src,
+  label: w.title,
+  tag: w.category,
+}))
 
 /** 笔记图片数量上限（与小红书一致） */
 export const MAX_IMAGES = 18
