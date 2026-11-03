@@ -5,6 +5,7 @@ import { Check, ChevronLeft } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { STEPS } from "@/lib/publish-data"
 import { usePublishStore } from "@/lib/store"
+import { MobilePreviewBar } from "./mobile-preview"
 import { StepImages } from "./step-images"
 import { StepCaption } from "./step-caption"
 import { StepOptions } from "./step-options"
@@ -92,7 +93,12 @@ export function Wizard() {
         })}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      {/* 窄屏迷你预览条（< md）：吸附在 header 下方，随时可打开完整预览 */}
+      <div className="sticky top-[68px] z-30 mb-4 md:hidden">
+        <MobilePreviewBar />
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0">
           {/* 当前用户可见的步骤：选图 → 文案 → 发布设置 */}
           <AnimatePresence mode="wait">
@@ -167,8 +173,8 @@ export function Wizard() {
           )}
         </div>
 
-        {/* 桌面端实时预览 */}
-        <aside className="hidden lg:block">
+        {/* 桌面端（≥ md）右侧实时预览 */}
+        <aside className="hidden md:block">
           <div className="sticky top-20">
             <p className="mb-3 text-xs font-medium text-muted-foreground">实时预览</p>
             <PreviewCard />
