@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils"
 import { ZHEFENG_CATEGORIES, proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
 import { useAppStore } from "@/lib/app-store"
 import { TokenSettingsDialog } from "@/components/workshop/token-settings"
+import { SelectionPanel } from "@/components/workshop/selection-panel"
 import {
   Dialog,
   DialogContent,
@@ -172,6 +173,8 @@ export function WorkshopTab() {
   const publishSelected = () => {
     goPublish(selected.map((w) => w.src))
     toast.success(`已暂存 ${selected.length} 张壁纸，去小红书创作者中心发布吧`)
+    // 图片已进入暂存架（全屏接管后可见），清空选择避免重复发布
+    setSelected([])
   }
 
   /** 触发一个下载（隐藏 iframe 导航方式，不弹新页） */
@@ -226,7 +229,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.0.10
+            v1.0.11
           </span>
           <button
             type="button"
@@ -252,8 +255,11 @@ export function WorkshopTab() {
         </p>
       </div>
 
-      {/* 分类筛选 + 已下载过滤（容器内吸顶） */}
-      <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 pb-2 pt-1 backdrop-blur-sm">
+      {/* 主体：左侧壁纸区 + 右侧已选面板（md 起常驻显示，避免窄断点看不到） */}
+      <div className="flex flex-col gap-5 md:flex-row">
+        <div className="min-w-0 flex-1">
+          {/* 分类筛选 + 已下载过滤（容器内吸顶） */}
+          <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 pb-2 pt-1 backdrop-blur-sm">
         <div className="flex items-center gap-2">
           <div className="custom-scrollbar flex flex-1 gap-2 overflow-x-auto pb-1" role="tablist" aria-label="壁纸分类">
             {ZHEFENG_CATEGORIES.map((c) => (
@@ -352,7 +358,7 @@ export function WorkshopTab() {
             )}
           </div>
         ) : (
-          <div className={cn("grid gap-3", isPhone ? "grid-cols-2 sm:grid-cols-4 lg:grid-cols-5" : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3")}>
+          <div className={cn("grid gap-3", isPhone ? "grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6" : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4")}>
             {list.items.map((w) => {
               const order = selected.findIndex((p) => p.id === w.id)
               const isSelected = order >= 0
@@ -469,8 +475,24 @@ export function WorkshopTab() {
           )}
         </div>
       </div>
+        </div>
 
-      {/* 悬浮操作栏：选中壁纸后出现 */}
+      {/* 右侧面板：已选壁纸清单 + 发布 / 批量下载 */}
+      <aside className="hidden md:block md:w-[280px] md:shrink-0 lg:w-[310px]">
+        <div className="md:sticky md:top-20">
+          <SelectionPanel
+            items={selected}
+            isPhone={isPhone}
+            onRemove={toggle}
+            onPublish={publishSelected}
+            onBatchDownload={batchDownload}
+            onClear={() => setSelected([])}
+          />
+        </div>
+      </aside>
+    </div>
+
+      {/* 悬浮操作栏：仅移动端（md 起由右侧面板接管） */}
       <AnimatePresence>
         {selected.length > 0 && (
           <motion.div
@@ -478,7 +500,7 @@ export function WorkshopTab() {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 80, opacity: 0 }}
             transition={{ type: "spring", stiffness: 320, damping: 28 }}
-            className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center gap-2 rounded-2xl border bg-background/95 p-2 pl-4 shadow-2xl backdrop-blur-md sm:gap-3 sm:pl-5"
+            className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center gap-2 rounded-2xl border bg-background/95 p-2 pl-4 shadow-2xl backdrop-blur-md md:hidden sm:gap-3 sm:pl-5"
             role="toolbar"
             aria-label="壁纸批量操作"
           >
