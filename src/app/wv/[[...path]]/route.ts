@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
 import {
+  WVS_QUERY,
   WV_SID_COOKIE,
   createWvSession,
-  getWvSession,
   isAllowedWvHost,
   proxyErrorHtml,
   proxyUpstream,
+  sessionFromRequest,
   touchSession,
 } from "@/lib/wv"
 
@@ -21,8 +22,12 @@ async function handle(req: NextRequest): Promise<Response> {
   const [, first, ...rest] = segments
 
   // cookie 同步信标（页面 document.cookie 写入转发到服务端 jar，按页面域名归域）
+  // 会话优先读 URL __wvs 参数（跨站 Cookie 受限时 beacon 由补丁带上）
   if (first === "__sync") {
-    const session = getWvSession(req.cookies.get(WV_SID_COOKIE)?.value)
+    const session = sessionFromRequest(
+      req.nextUrl.searchParams.get(WVS_QUERY),
+      req.cookies.get(WV_SID_COOKIE)?.value
+    )
     const c = req.nextUrl.searchParams.get("c") ?? ""
     let syncHost = req.nextUrl.searchParams.get("h") ?? ""
     // 无 h 参数时从 Referer 还原页面域名
@@ -56,8 +61,11 @@ async function handle(req: NextRequest): Promise<Response> {
     return NextResponse.json({ error: "该站点不在内嵌白名单内" }, { status: 403 })
   }
 
-  // 会话（没有则新建）
-  let session = getWvSession(req.cookies.get(WV_SID_COOKIE)?.value)
+  // 会话（URL __wvs 参数优先，其次 cookie；没有则新建）
+  let session = sessionFromRequest(
+    req.nextUrl.searchParams.get(WVS_QUERY),
+    req.cookies.get(WV_SID_COOKIE)?.value
+  )
   if (!session) session = createWvSession(host)
 
   const path = rest.join("/")

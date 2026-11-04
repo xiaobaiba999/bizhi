@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ArrowLeft, Cloud, ExternalLink, RefreshCw, Send } from "lucide-react"
 import { useAppStore, type WebviewKind } from "@/lib/app-store"
 import { StagingShelf } from "@/components/webview/staging-shelf"
@@ -33,7 +33,8 @@ type Nonce = Record<WebviewKind, number>
  * 全屏内嵌网页视图（直接接管整个软件页面）：
  * - 小红书创作者中心 / 夸克网盘原网页铺满整个视口，无小窗口、无内嵌滚动条
  * - iframe 懒挂载且常驻（关闭再打开不丢登录态 / 页面状态）
- * - 登录态走本地代理会话（wv_sid），刷新 / 重开无需重复扫码
+ * - 登录态走本地代理会话（wv_sid cookie + URL __wvs 参数双通道）：
+ *   预览面板是跨站 iframe 时第三方 Cookie 可能被封，URL 参数保证会话不丢
  */
 export function WebviewOverlay() {
   const webview = useAppStore((s) => s.webview)
@@ -49,6 +50,12 @@ export function WebviewOverlay() {
     quark: true,
   })
   const [nonce, setNonce] = useState<Nonce>({ xhs: 0, quark: 0 })
+  /** 代理会话 id（从内嵌页 __WV_SID__ 捕获；重挂载/刷新时经 URL 传回，跨站 Cookie 被封也不丢登录态） */
+  const [wvSid, setWvSid] = useState<string | null>(null)
+  const frameRefs = useRef<Record<WebviewKind, HTMLIFrameElement | null>>({
+    xhs: null,
+    quark: null,
+  })
 
   useEffect(() => {
     if (!webview) return
@@ -70,6 +77,22 @@ export function WebviewOverlay() {
     setLoading((prev) => ({ ...prev, [kind]: true }))
     setNonce((prev) => ({ ...prev, [kind]: prev[kind] + 1 }))
   }
+
+  /** 内嵌页加载完成：捕获代理会话 id（注入在页面里的 __WV_SID__，同源可读） */
+  const onFrameLoad = (kind: WebviewKind) => {
+    setLoading((prev) => ({ ...prev, [kind]: false }))
+    try {
+      const frame = frameRefs.current[kind]
+      const sid = frame?.contentWindow?.__WV_SID__
+      if (typeof sid === "string" && sid) setWvSid(sid)
+    } catch {
+      // 跨域或页面切换中：忽略
+    }
+  }
+
+  /** iframe src：带上 URL 会话参数（跨站 Cookie 被封的预览环境下保证会话延续） */
+  const frameSrc = (src: string) =>
+    wvSid ? `${src}${src.includes("?") ? "&" : "?"}__wvs=${encodeURIComponent(wvSid)}` : src
 
   return (
     <div
@@ -145,9 +168,12 @@ export function WebviewOverlay() {
             )}
             <iframe
               key={`xhs-${nonce.xhs}`}
-              src={VIEWS.xhs.src}
+              ref={(el) => {
+                frameRefs.current.xhs = el
+              }}
+              src={frameSrc(VIEWS.xhs.src)}
               title="小红书创作者中心（全屏内嵌）"
-              onLoad={() => setLoading((prev) => ({ ...prev, xhs: false }))}
+              onLoad={() => onFrameLoad("xhs")}
               allow="clipboard-read; clipboard-write; fullscreen; autoplay; encrypted-media"
               referrerPolicy="no-referrer-when-downgrade"
               className="h-full w-full border-0 bg-white"
@@ -165,11 +191,14 @@ export function WebviewOverlay() {
             )}
             <iframe
               key={`quark-${nonce.quark}`}
-              src={VIEWS.quark.src}
+              ref={(el) => {
+                frameRefs.current.quark = el
+              }}
+              src={frameSrc(VIEWS.quark.src)}
               title="夸克网盘（全屏内嵌）"
-              onLoad={() => setLoading((prev) => ({ ...prev, quark: false }))}
+              onLoad={() => onFrameLoad("quark")}
               allow="clipboard-read; clipboard-write; fullscreen; autoplay; encrypted-media"
-              referrerPolicy="no-referrer-when-downgrade"
+              referrerPolicy="no-ref-when-downgrade"
               className="h-full w-full border-0 bg-white"
             />
           </div>
