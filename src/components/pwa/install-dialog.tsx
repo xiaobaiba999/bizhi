@@ -63,8 +63,9 @@ const INSTALL_STEPS: Record<Platform, string[]> = {
 
 const UNINSTALL_STEPS: Record<Platform, string[]> = {
   windows: [
-    "开始菜单右键「壁纸工坊」→ 卸载；或 设置 → 应用 → 安装的应用 → 卸载",
-    "卸载时勾选「同时从 Chrome 清除数据」，本地缓存一并清空",
+    "exe 安装版：开始菜单右键「壁纸工坊」→ 卸载，或 设置 → 应用 → 安装的应用 → 壁纸工坊 → 卸载",
+    "卸载向导中勾选「同时删除应用数据」→ 安装目录、数据库、缓存全部清除，无任何残留",
+    "网页版（PWA）：开始菜单右键 → 卸载；或 chrome://apps 右键图标 → 移除 Chrome 应用",
   ],
   macos: ["启动台长按拖入废纸篓；或打开 chrome://apps 右键图标 → 移除 Chrome 应用"],
   ios: ["主屏幕长按「壁纸工坊」图标 → 删除 App → 删除（立即移除，无残留）"],
@@ -218,11 +219,40 @@ export function AppInstallDialog() {
             安装「壁纸工坊」到桌面
           </DialogTitle>
           <DialogDescription>
-            像正常软件一样安装、独立窗口运行；卸载走系统应用管理，不留残留
+            Windows 可下载 exe 安装包；其他平台可用浏览器安装。均能正常卸载、不留残留
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 px-5 py-4">
+          {/* 方式一：Windows exe 安装包 */}
+          <section aria-label="Windows 桌面安装包下载">
+            <div className="rounded-2xl border-2 border-primary/30 bg-primary/5 p-4">
+              <p className="flex flex-wrap items-center gap-2 text-sm font-bold">
+                <Monitor className="size-4 text-primary" />
+                Windows 桌面版（exe 安装包）
+                <span className="ml-auto rounded-full bg-primary px-2 py-0.5 text-[10px] font-bold text-primary-foreground">
+                  推荐
+                </span>
+              </p>
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                正经的桌面软件安装包：向导式安装、独立窗口运行、桌面与开始菜单快捷方式、
+                壁纸自动存入「下载」文件夹；卸载走系统应用管理，勾选删除数据即可彻底清理。
+              </p>
+              <a
+                href="/desktop/壁纸工坊-Setup-1.1.0.exe"
+                download
+                className="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
+              >
+                <Download className="size-4" />
+                下载安装包（v1.1.0 · 约 167MB）
+              </a>
+              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/80">
+                双击运行 → 下一步 → 安装 → 完成。未签名应用首次运行时 SmartScreen
+                可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。
+              </p>
+            </div>
+          </section>
+
           {/* 当前状态 */}
           {standalone ? (
             <p className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs font-semibold text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-400">
@@ -259,7 +289,7 @@ export function AppInstallDialog() {
 
           {/* 安装步骤 */}
           <section aria-label="各平台安装步骤">
-            <h3 className="mb-2 text-sm font-bold">手动安装（按对应平台操作）</h3>
+            <h3 className="mb-2 text-sm font-bold">方式二：浏览器安装（PWA，免下载安装包）</h3>
             <div className="space-y-2">
               {orderedPlatforms.map((p) => (
                 <StepList
@@ -287,9 +317,9 @@ export function AppInstallDialog() {
             </div>
             <p className="mt-3 flex gap-2 rounded-2xl bg-muted px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground">
               <Info className="size-4 shrink-0 translate-y-0.5" />
-              卸载由系统 / 浏览器执行：本应用在本地只占用「缓存 + 本地存储」，
-              卸载时会自动一并清除，不会在系统中留下任何文件或注册表残留。
-              下载记录与登录令牌保存在服务端数据库，与本地卸载无关（可在工坊内自行清空）。
+              exe 安装版卸载时由 NSIS 卸载器清理安装目录，并可选删除用户数据目录（数据库）；
+              网页版在本地只占用「缓存 + 本地存储」，卸载时自动一并清除。
+              两者均不会在系统中留下文件或注册表残留；下载的壁纸保存在用户「下载」文件夹，属于用户自己的文件。
             </p>
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <button

@@ -19,6 +19,12 @@ const eslintConfig = defineConfig([
     "scripts/**",
     "download/**",
     "upload/**",
+    // 桌面版（Electron）构建产物与源码（CommonJS，不经 Next 编译）
+    ".next-desktop/**",
+    "release/**",
+    "desktop/**",
+    "public/desktop/**",
+    "tool-results/**",
   ]),
   {
     rules: {

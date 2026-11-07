@@ -1,14 +1,20 @@
 {
-  "name": "xhs-scaffold",
-  "version": "0.1.0",
+  "name": "wallpaper-workshop",
+  "version": "1.1.0",
   "private": true,
+  "description": "壁纸工坊 —— 哲风壁纸实时获取与原图下载工具（桌面安装版）",
+  "author": "Wallpaper Workshop",
+  "main": "desktop/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
-    "db:push": "prisma db push"
+    "db:push": "prisma db push",
+    "desktop:assemble": "node scripts/build-desktop.mjs --assemble",
+    "desktop:linux": "node scripts/build-desktop.mjs --linux",
+    "desktop:win": "node scripts/build-desktop.mjs --win"
   },
   "dependencies": {
     "@prisma/client": "6.16.2",
@@ -32,6 +38,8 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
     "eslint": "^9",
     "eslint-config-next": "16.4.4",
     "prisma": "6.16.2",

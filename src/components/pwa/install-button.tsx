@@ -1,24 +1,34 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useSyncExternalStore } from "react"
 import { toast } from "sonner"
 import { MonitorSmartphone } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { usePwaStore } from "@/lib/pwa-store"
 
+/** 读取 preload 注入的桌面环境标记（SSR 期间恒为 false，无水合不一致） */
+function useIsDesktopApp() {
+  return useSyncExternalStore(
+    () => () => {},
+    () => Boolean((window as unknown as { desktopApp?: unknown }).desktopApp),
+    () => false
+  )
+}
+
 /**
  * 顶栏「安装应用」按钮：
  * - 原生安装事件可用 → 点击直接唤起浏览器安装弹窗
- * - 不可用（Safari / 内嵌预览）→ 打开安装说明弹窗（手动步骤 + 卸载方法）
- * - 已是安装版独立窗口 → 隐藏
+ * - 不可用（Safari / 内嵌预览）→ 打开安装说明弹窗（exe 安装包 + 手动步骤 + 卸载方法）
+ * - 已是安装版独立窗口 / Electron 桌面版 → 隐藏
  */
 export function InstallAppButton({ className }: { className?: string }) {
   const deferredPrompt = usePwaStore((s) => s.deferredPrompt)
   const standalone = usePwaStore((s) => s.standalone)
   const setDialogOpen = usePwaStore((s) => s.setDialogOpen)
   const [busy, setBusy] = useState(false)
+  const isDesktopApp = useIsDesktopApp()
 
-  if (standalone) return null
+  if (standalone || isDesktopApp) return null
 
   const onClick = async () => {
     if (deferredPrompt && !busy) {

@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 桌面版打包产物
+/.next-desktop/
+/release/
+/public/desktop/

@@ -40,8 +40,10 @@ export function PwaProvider() {
     window.addEventListener("beforeinstallprompt", onBeforeInstall)
     window.addEventListener("appinstalled", onInstalled)
 
-    // 3) 注册 Service Worker（不支持 / 非安全环境时静默跳过）
-    if ("serviceWorker" in navigator) {
+    // 3) 注册 Service Worker（不支持 / 非安全环境 / Electron 桌面版时静默跳过）
+    //    Electron 桌面版：本地服务器随应用运行，离线缓存无意义且可能造成陈旧页面
+    const isDesktopApp = Boolean((window as unknown as { desktopApp?: unknown }).desktopApp)
+    if (!isDesktopApp && "serviceWorker" in navigator) {
       const register = () => {
         navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {})
       }
