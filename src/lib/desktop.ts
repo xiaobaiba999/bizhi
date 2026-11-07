@@ -12,12 +12,25 @@ export interface DownloadDonePayload {
   filename: string
 }
 
+export interface ChooseDirResult {
+  ok: boolean
+  /** 新目录绝对路径 */
+  dir?: string
+  /** 用户取消了选择 */
+  canceled?: boolean
+  error?: string
+}
+
 export interface DesktopAppApi {
   isDesktop: boolean
   platform: string
   version: string | null
-  /** 下载保存目录（系统「下载\壁纸工坊」） */
+  /** 下载保存目录（自选位置优先，默认「下载\壁纸工坊」） */
   getDownloadDir(): Promise<string>
+  /** 弹出系统对话框选择保存位置（持久化，重启后仍生效） */
+  chooseDownloadDir(): Promise<ChooseDirResult>
+  /** 恢复默认下载目录（取消自选） */
+  resetDownloadDir(): Promise<ChooseDirResult>
   /** 打开下载目录（调起磁盘文件管理器），返回错误字符串（空 = 成功） */
   openDownloadDir(): Promise<string>
   /** 定位并选中某个已下载文件，返回错误字符串（空 = 成功） */
@@ -55,7 +68,29 @@ export async function fetchDownloadDir(): Promise<string | null> {
   }
 }
 
-export interface FolderActionResult {
+/** 弹出系统对话框选择桌面版保存位置（仅桌面版有效） */
+export async function chooseDesktopDownloadDir(): Promise<ChooseDirResult | null> {
+  const api = getDesktopApp()
+  if (!api?.chooseDownloadDir) return null
+  try {
+    return await api.chooseDownloadDir()
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 恢复桌面版默认下载目录（取消自选） */
+export async function resetDesktopDownloadDir(): Promise<ChooseDirResult | null> {
+  const api = getDesktopApp()
+  if (!api?.resetDownloadDir) return null
+  try {
+    return await api.resetDownloadDir()
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+interface FolderActionResult {
   ok: boolean
   error?: string
 }

@@ -1,15 +1,18 @@
 /**
- * 哲风壁纸（haowallpaper.com）微信扫码登录
+ * 哲风壁纸（haowallpaper.com）微信扫码登录 —— 服务端全托管实现
  *
- * 登录机制（逆向自官网前端）：
- * 1. 页面生成随机 state，内嵌微信开放平台二维码 iframe：
- *    https://open.weixin.qq.com/connect/qrconnect?appid=<appid>&scope=snsapi_login
- *      &redirect_uri=<官网回调>&state=<state>&login_type=jssdk&self_redirect=true
- * 2. 手机微信扫码确认后，二维码 iframe 跳到官网回调（code+state），官网服务端
- *    用 code 换取用户信息并把登录令牌挂到该 state 上。
- * 3. 页面轮询 /link/app/appUser/stateLogin?state=<state>，出现 token 即登录成功。
+ * 背景：微信开放平台二维码页面在跨域 iframe 中会显示
+ * 「微信授权请求与发起浏览器不匹配」拒绝渲染（父页面域名不是 redirect_uri 域名）。
+ * 因此改为服务端全托管：
+ * 1. 服务端抓取微信 qrconnect 页面，提取 uuid 与二维码图片直链
+ *    （https://open.weixin.qq.com/connect/qrcode/<uuid>，浏览器直显无 iframe）
+ * 2. 服务端长轮询微信 lp 端点（/connect/l/qrconnect?uuid=...&last=...）：
+ *    - 408 等待扫码 / 404 已扫码待确认 / 405 已确认（返回 wx_code）/ 402 过期 / 403 用户取消
+ * 3. 用户在手机上确认后（405）服务端代替浏览器 GET 官网回调
+ *    wxLogin?code=<wx_code>&state=<state>，让官网把登录令牌挂到 state 上
+ * 4. 再轮询官网 stateLogin?state=... 拿到令牌，交由 API 路由存入本地数据库
  *
- * 本地服务端代替浏览器轮询（无 CORS 问题），拿到令牌后存入本地数据库。
+ * 手机扫码 → 微信确认 → lp 返回 405+code，全程无需任何浏览器上下文，天然免疫 iframe 限制。
  */
 
 const API_BASE = "https://haowallpaper.com"
@@ -23,18 +26,18 @@ export const ZF_WX_CALLBACK = "https://haowallpaper.com/link/app/appUser/wxLogin
 /** 扫码状态轮询接口 */
 export const ZF_STATE_LOGIN_URL = `${API_BASE}/link/app/appUser/stateLogin`
 
-/**
- * 扫码会话登记（进程内存）：记录创建时间，用于本地判定过期，
- * 避免「源站迟迟不报过期 → 前端无限等待」的问题。
- */
-const sessions = new Map<string, number>()
+/** 微信开放平台 qrconnect 页面 */
+const WX_QRCONNECT_URL = "https://open.weixin.qq.com/connect/qrconnect"
+
+/** 微信长轮询端点（扫码状态） */
+const WX_LP_URL = "https://lp.open.weixin.qq.com/connect/l/qrconnect"
 
 /** 二维码会话本地过期时间（毫秒）：超过即直接判过期，不再依赖源站 */
-export const QR_SESSION_TTL_MS = 3 * 60 * 1000
+export const QR_SESSION_TTL_MS = 150 * 1000
 
 /** 登录相关端点连通性（用于提前给出明确错误，避免无意义的无限等待） */
 export interface LoginEndpointStatus {
-  /** 微信开放平台（二维码 iframe）是否可达 */
+  /** 微信开放平台（二维码 / lp 轮询）是否可达 */
   wx: boolean
   /** 哲风壁纸登录服务是否可达 */
   zf: boolean
@@ -57,22 +60,73 @@ export function zfUpstreamHeaders(extra?: Record<string, string>): Record<string
   }
 }
 
-/** 生成随机 state（与官网一致的 uuid 形态），同时登记会话创建时间 */
+/* ---------------- 扫码会话（进程内存） ---------------- */
+
+export type QrPhase = "starting" | "waiting" | "scanned" | "ok" | "expired" | "error"
+
+interface QrSessionObj {
+  state: string
+  /** 微信二维码 uuid（qrconnect 页面提取） */
+  uuid: string | null
+  createdAt: number
+  phase: QrPhase
+  /** 登录成功后的令牌（由 API 路由读取并入库） */
+  token?: string
+  /** phase 具体说明 */
+  msg?: string
+  /** 令牌是否已入库（避免重复写） */
+  tokenSaved?: boolean
+  /** lp 连续异常计数 */
+  lpFails: number
+}
+
+const sessions = new Map<string, QrSessionObj>()
+
+/** 二维码图片直链（uuid 就绪后可用） */
+export function qrImageUrl(state: string): string | null {
+  const s = sessions.get(state)
+  return s?.uuid ? `https://open.weixin.qq.com/connect/qrcode/${s.uuid}` : null
+}
+
+/** 生成随机 state（与官网一致的 uuid 形态）并登记会话 */
 export function newState(): string {
   const state = crypto.randomUUID()
-  sessions.set(state, Date.now())
-  // 顺手清理超过 1 小时的旧会话，防止内存增长
-  if (sessions.size > 64) {
+  sessions.set(state, {
+    state,
+    uuid: null,
+    createdAt: Date.now(),
+    phase: "starting",
+    lpFails: 0,
+  })
+  // 顺手清理超过 10 分钟的旧会话，防止内存增长
+  if (sessions.size > 32) {
     const now = Date.now()
-    for (const [k, t] of sessions) {
-      if (now - t > 3_600_000) sessions.delete(k)
+    for (const [k, s] of sessions) {
+      if (now - s.createdAt > 600_000) sessions.delete(k)
     }
   }
   return state
 }
 
-/** 构造微信开放平台扫码二维码 iframe 地址（与官网 WxLogin 参数一致） */
-export function buildWxQrUrl(state: string): string {
+/* ---------------- ① 抓取 qrconnect 页面，提取 uuid 并启动后台轮询 ---------------- */
+
+/** 从 qrconnect HTML 里挖 uuid（页面里以 window.uuid / 二维码图片 src 两种形态出现） */
+function extractUuid(html: string): string | null {
+  const m =
+    html.match(/\/connect\/qrcode\/([0-9A-Za-z_-]{6,64})/) ??
+    html.match(/window\.uuid\s*=\s*["']([0-9A-Za-z_-]{6,64})["']/)
+  return m ? m[1] : null
+}
+
+/**
+ * 发起扫码会话：
+ * 抓取微信 qrconnect 页面（与官网登录参数一致）→ 提取 uuid → 启动后台 lp 轮询循环。
+ * 返回二维码图片直链；失败抛错（API 路由转成明确错误信息）。
+ */
+export async function startQrSession(state: string): Promise<string> {
+  const s = sessions.get(state)
+  if (!s) throw new Error("会话不存在，请刷新重试")
+
   const params = new URLSearchParams({
     appid: ZF_WX_APPID,
     scope: "snsapi_login",
@@ -81,22 +135,119 @@ export function buildWxQrUrl(state: string): string {
     login_type: "jssdk",
     self_redirect: "true",
   })
-  return `https://open.weixin.qq.com/connect/qrconnect?${params.toString()}`
+  const res = await fetch(`${WX_QRCONNECT_URL}?${params.toString()}`, {
+    headers: {
+      "User-Agent": UA,
+      Referer: `${API_BASE}/`,
+      Accept: "text/html,application/xhtml+xml,*/*",
+    },
+    signal: AbortSignal.timeout(15000),
+    cache: "no-store",
+  })
+  if (!res.ok) throw new Error(`微信二维码页面获取失败（HTTP ${res.status}）`)
+
+  const html = await res.text()
+  const uuid = extractUuid(html)
+  if (!uuid) throw new Error("微信二维码解析失败（页面结构可能已变化）")
+
+  s.uuid = uuid
+  s.phase = "waiting"
+  // 后台轮询（不 await：独立循环，前端每 2 秒来查一次会话状态即可）
+  void pollLoop(s)
+  return `https://open.weixin.qq.com/connect/qrcode/${uuid}`
 }
 
-export type ZfPollStatus = "pending" | "ok" | "expired" | "error"
+/* ---------------- ② 后台长轮询微信 lp 端点 ---------------- */
 
-export interface ZfPollResult {
-  status: ZfPollStatus
-  /** 登录成功时的令牌 */
-  token?: string
-  /** 过期/错误说明 */
-  msg?: string
+/** 解析 lp 响应：window.wx_errcode=405;window.wx_code='xxx'; */
+function parseLp(text: string): { errcode: number; code: string } {
+  const ec = text.match(/wx_errcode=(\d+)/)
+  const code = text.match(/wx_code='([^']*)'/) ?? text.match(/wx_code="([^"]*)"/)
+  return {
+    errcode: ec ? Number(ec[1]) : -1,
+    code: code ? code[1] : "",
+  }
 }
 
 /**
- * 在令牌响应里深挖 token 字段（官网前端同样兼容 data / data.data 两层）。
+ * 会话级后台轮询循环：
+ * - 408 等待 / 404 已扫码 / 403 用户取消（可重新扫）/ 405 已确认（拿 code 换令牌）
+ * - 402 或本地 TTL 超时 → 过期；连续 3 次网络异常 → error
  */
+async function pollLoop(s: QrSessionObj): Promise<void> {
+  let last = 400
+  while (sessions.get(s.state) === s && Date.now() - s.createdAt < QR_SESSION_TTL_MS) {
+    if (s.phase === "ok" || s.phase === "expired" || s.phase === "error") return
+    try {
+      const res = await fetch(`${WX_LP_URL}?uuid=${s.uuid}&last=${last}`, {
+        headers: {
+          "User-Agent": UA,
+          Referer: "https://open.weixin.qq.com/",
+          Accept: "*/*",
+        },
+        // lp 为长轮询：挂起最长约 25 秒；客户端超时略放宽
+        signal: AbortSignal.timeout(28_000),
+        cache: "no-store",
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const { errcode, code } = parseLp(await res.text())
+      s.lpFails = 0
+
+      if (errcode === 405 && code) {
+        // 已确认：拿 code 触发官网回调，把令牌挂到 state 上
+        s.phase = "scanned"
+        await finalizeLogin(s, code)
+        return
+      }
+      if (errcode === 404) {
+        s.phase = "scanned" // 已扫码，等待手机上点确认
+        last = 404
+        continue
+      }
+      if (errcode === 403) {
+        // 用户在手机上点了取消：二维码仍可再次扫码，回到等待
+        s.phase = "waiting"
+        s.msg = "已取消授权，可重新扫码"
+        last = 403
+        continue
+      }
+      if (errcode === 402) {
+        s.phase = "expired"
+        s.msg = "二维码已过期，请刷新后重新扫码"
+        return
+      }
+      if (errcode === 408) {
+        last = 408
+        if (s.phase === "scanned") s.phase = "waiting" // 确认超时回落
+        continue
+      }
+      // 其他 errcode：计数容错
+      s.lpFails += 1
+      if (s.lpFails >= 3) {
+        s.phase = "error"
+        s.msg = `微信扫码状态异常（errcode=${errcode}），请刷新重试`
+        return
+      }
+    } catch {
+      // 网络异常 / 超时：lp 超时属于正常长轮询节奏，仅在客户端断连时计为失败
+      s.lpFails += 1
+      if (s.lpFails >= 3) {
+        s.phase = "error"
+        s.msg = "与微信服务器的连接异常，请刷新重试"
+        return
+      }
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+  }
+  if (sessions.get(s.state) === s && s.phase !== "ok") {
+    s.phase = "expired"
+    s.msg = "二维码已超时，请刷新后重新扫码"
+  }
+}
+
+/* ---------------- ③ code → 官网回调 → 令牌 ---------------- */
+
+/** 在令牌响应里深挖 token 字段（官网前端同样兼容 data / data.data 两层） */
 function digToken(data: unknown, depth = 0): string | null {
   if (!data || typeof data !== "object" || Array.isArray(data) || depth > 3) return null
   const obj = data as Record<string, unknown>
@@ -104,50 +255,55 @@ function digToken(data: unknown, depth = 0): string | null {
   return digToken(obj.data, depth + 1)
 }
 
-/** 会话是否已超过本地 TTL（超时直接判过期，不再无限等待源站） */
-function sessionTimedOut(state: string): boolean {
-  const t = sessions.get(state)
-  return typeof t === "number" && Date.now() - t > QR_SESSION_TTL_MS
-}
-
 /**
- * 探测登录相关端点连通性。
- * 只要能拿到任意 HTTP 响应（含 4xx/5xx）即视为网络可达；
- * 仅在 DNS / TCP / TLS 全部失败（fetch 抛异常）时判定不可达。
+ * 用户已确认（拿到 wx_code）：
+ * 1. 服务端 GET 官网回调 wxLogin?code=&state= —— 官网服务端用 code 换用户信息并把令牌挂到 state
+ * 2. 轮询 stateLogin 直到出现令牌（兜底：回调响应本身也可能带令牌）
  */
-export async function probeLoginEndpoints(): Promise<LoginEndpointStatus> {
-  const ping = async (url: string): Promise<boolean> => {
+async function finalizeLogin(s: QrSessionObj, wxCode: string): Promise<void> {
+  const cbUrl = `${ZF_WX_CALLBACK}?code=${encodeURIComponent(wxCode)}&state=${encodeURIComponent(s.state)}`
+  let token: string | null = null
+  try {
+    const res = await fetch(cbUrl, {
+      headers: zfUpstreamHeaders(),
+      redirect: "manual",
+      signal: AbortSignal.timeout(15000),
+      cache: "no-store",
+    })
+    // 回调响应可能是 HTML（官网前端页面）或 JSON；JSON 时直接挖令牌
+    const text = await res.text()
     try {
-      await fetch(url, {
-        headers: zfUpstreamHeaders(),
-        redirect: "manual",
-        signal: AbortSignal.timeout(6000),
-        cache: "no-store",
-      })
-      return true
+      token = digToken(JSON.parse(text))
     } catch {
-      return false
+      /* HTML 响应：令牌挂在了 state 上，走 stateLogin 轮询 */
     }
+  } catch {
+    /* 回调失败：仍尝试 stateLogin（官网可能已处理完） */
   }
-  const [wx, zf] = await Promise.all([ping("https://open.weixin.qq.com/"), ping(`${API_BASE}/`)])
-  return { wx, zf }
+
+  // 轮询官网 stateLogin（最多 ~12 秒），令牌由官网挂到 state 上
+  for (let i = 0; i < 6 && !token; i++) {
+    const r = await pollStateLoginDirect(s.state)
+    if (r.status === "ok" && r.token) {
+      token = r.token
+      break
+    }
+    if (r.status === "expired" || r.status === "error") break
+    await new Promise((r2) => setTimeout(r2, 2000))
+  }
+
+  if (token) {
+    s.phase = "ok"
+    s.token = token
+    s.msg = undefined
+  } else {
+    s.phase = "error"
+    s.msg = "授权已确认，但获取登录令牌失败，请刷新重试或改用手动粘贴"
+  }
 }
 
-/**
- * 服务端代为轮询扫码状态。
- * - 会话超过本地 TTL → 直接判过期（避免前端无限等待）
- * - status 200 + data 含 token → ok
- * - status 305 且 msg 为空 → pending（等待扫码）
- * - status 305 且 msg 非空 → expired（二维码过期/失效）
- * - 其他 → error
- */
-export async function pollStateLogin(state: string): Promise<ZfPollResult> {
-  if (!/^[0-9A-Za-z_-]{1,128}$/.test(state)) {
-    return { status: "error", msg: "state 参数不合法" }
-  }
-  if (sessionTimedOut(state)) {
-    return { status: "expired", msg: "二维码已超时，请刷新后重新扫码" }
-  }
+/** 直接调用官网 stateLogin（与旧版行为一致） */
+async function pollStateLoginDirect(state: string): Promise<{ status: "pending" | "ok" | "expired" | "error"; token?: string; msg?: string }> {
   try {
     const res = await fetch(`${ZF_STATE_LOGIN_URL}?state=${encodeURIComponent(state)}`, {
       headers: zfUpstreamHeaders(),
@@ -174,4 +330,70 @@ export async function pollStateLogin(state: string): Promise<ZfPollResult> {
   } catch (e) {
     return { status: "error", msg: e instanceof Error ? e.message : "网络异常" }
   }
+}
+
+/* ---------------- ④ 前端轮询入口：读会话状态 ---------------- */
+
+export type ZfPollStatus = "pending" | "scanned" | "ok" | "expired" | "error"
+
+export interface ZfPollResult {
+  status: ZfPollStatus
+  /** 登录成功时的令牌 */
+  token?: string
+  /** 已取消授权等过程提示 */
+  msg?: string
+  /** 令牌是否首次出现（API 路由据此入库） */
+  tokenFresh?: boolean
+}
+
+/** 前端轮询：返回会话当前状态（后台循环已在跑，这里只读） */
+export function pollStateLogin(state: string): ZfPollResult {
+  if (!/^[0-9A-Za-z_-]{1,128}$/.test(state)) {
+    return { status: "error", msg: "state 参数不合法" }
+  }
+  const s = sessions.get(state)
+  if (!s) {
+    return { status: "error", msg: "会话不存在或已失效，请刷新二维码" }
+  }
+  if (s.phase === "starting") return { status: "pending" }
+  if (s.phase === "waiting") return { status: "pending", msg: s.msg }
+  if (s.phase === "scanned") return { status: "scanned", msg: s.msg }
+  if (s.phase === "ok" && s.token) {
+    return { status: "ok", token: s.token, tokenFresh: !s.tokenSaved }
+  }
+  if (s.phase === "expired") {
+    return { status: "expired", msg: s.msg ?? "二维码已过期，请刷新后重新扫码" }
+  }
+  return { status: "error", msg: s.msg ?? "登录状态异常，请刷新重试" }
+}
+
+/** 标记令牌已入库（API 路由保存成功后调用） */
+export function markTokenSaved(state: string): void {
+  const s = sessions.get(state)
+  if (s) s.tokenSaved = true
+}
+
+/* ---------------- 连通性预检 ---------------- */
+
+/**
+ * 探测登录相关端点连通性。
+ * 只要能拿到任意 HTTP 响应（含 4xx/5xx）即视为网络可达；
+ * 仅在 DNS / TCP / TLS 全部失败（fetch 抛异常）时判定不可达。
+ */
+export async function probeLoginEndpoints(): Promise<LoginEndpointStatus> {
+  const ping = async (url: string): Promise<boolean> => {
+    try {
+      await fetch(url, {
+        headers: zfUpstreamHeaders(),
+        redirect: "manual",
+        signal: AbortSignal.timeout(6000),
+        cache: "no-store",
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+  const [wx, zf] = await Promise.all([ping("https://open.weixin.qq.com/"), ping(`${API_BASE}/`)])
+  return { wx, zf }
 }

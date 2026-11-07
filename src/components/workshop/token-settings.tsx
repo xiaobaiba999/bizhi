@@ -30,47 +30,33 @@ interface TokenState {
 
 interface QrSession {
   state: string
-  qrUrl: string
+  /** 二维码图片直链（服务端从微信 qrconnect 页面提取，<img> 直显免 iframe 拦截） */
+  qrImg: string | null
   /** 服务端连通性预检：微信开放平台 / 哲风壁纸是否可达 */
   wxReachable?: boolean
   zfReachable?: boolean
+  /** 二维码会话创建失败的详细原因 */
+  startError?: string
 }
 
-type QrPhase = "loading" | "waiting" | "ok" | "expired" | "error"
+type QrPhase = "loading" | "waiting" | "scanned" | "ok" | "expired" | "error"
 
 const QR_TTL = 120
-/** 二维码 iframe 加载超时：超时判定「二维码显示失败」，不再停留在等待页 */
+/** 二维码图片加载超时：超时判定「二维码显示失败」，不再停留在等待页 */
 const QR_LOAD_TIMEOUT = 12000
 /** 轮询连续失败阈值：达到即停止并报错（约 6 秒内给出明确反馈，杜绝无限等待） */
 const POLL_FAIL_LIMIT = 3
 
 /**
- * 浏览器侧探测微信开放平台可达性（no-cors：任何 HTTP 响应都算可达，
- * 仅网络级失败 —— DNS/TCP/TLS 被拒或被拦截器阻断 —— 才会 reject）。
- * 不能只依赖 iframe 的 load 事件：加载失败时 load 照样触发（错误页 / about:blank）。
- */
-async function browserProbeWeChat(timeoutMs = 6000): Promise<boolean> {
-  try {
-    await fetch("https://open.weixin.qq.com/favicon.ico", {
-      mode: "no-cors",
-      cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
  * 登录令牌设置：
- * - 扫码登录：内嵌哲风壁纸同款「微信开放平台扫码二维码」，扫码确认后令牌自动入库
+ * - 扫码登录：直显服务端提取的「微信开放平台扫码二维码」图片（免 iframe 跨域拦截），
+ *   状态区分「等待扫码 → 已扫码待确认 → 成功」，扫码确认后令牌自动入库
  * - 手动粘贴：从官网浏览器开发者工具复制令牌
  * 令牌用于下载原图（与官网分辨率、文件大小完全一致），仅保存在本地数据库。
  *
  * 扫码等待体验优化（避免「登录不上一直等待」）：
  * - 发起时服务端预检微信 / 哲风连通性，不可达直接报错并给手动粘贴兜底
- * - 二维码 iframe 12 秒未加载出来 → 判定加载失败
+ * - 二维码图片 12 秒未加载出来 → 判定加载失败
  * - 轮询连续 3 次失败 → 停止轮询并报错
  * - 倒计时归零 → 本地立即判过期（不等源站）
  * - 等待期间随时可刷新二维码 / 切换手动粘贴
@@ -163,16 +149,11 @@ export function TokenSettingsDialog({
             setErrorMsg("无法访问哲风壁纸登录服务（haowallpaper.com），扫码后也拿不到令牌")
             return
           }
-          // 浏览器侧再探一次：浏览器代理 / 拦截器可能单独挡掉 iframe 请求
-          // （此时二维码显示不出来，但 iframe 的 load 事件照样触发，无法事后判别）
-          const browserOk = await browserProbeWeChat()
-          if (cancelled) return
-          if (!browserOk) {
+          if (!data.qrImg) {
+            // 服务端提取二维码失败（qrconnect 页面抓取/解析失败）
             setQr(null)
             setPhase("error")
-            setErrorMsg(
-              "浏览器无法访问微信开放平台（可能被代理或拦截器屏蔽），请刷新重试或改用手动粘贴"
-            )
+            setErrorMsg(data.startError ?? "二维码会话创建失败，请刷新重试或改用手动粘贴")
             return
           }
           setQr(data)
@@ -191,36 +172,37 @@ export function TokenSettingsDialog({
     }
   }, [open, mode, qrNonce])
 
-  // 倒计时
+  // 倒计时（waiting 与 scanned 阶段都计时）
   useEffect(() => {
-    if (!open || mode !== "qrcode" || phase !== "waiting") return
+    if (!open || mode !== "qrcode" || (phase !== "waiting" && phase !== "scanned")) return
     const t = setInterval(() => setCountdown((c) => (c > 0 ? c - 1 : 0)), 1000)
     return () => clearInterval(t)
   }, [open, mode, phase])
 
-  // 倒计时归零 → 本地立即判过期并停止轮询（不等源站 305，杜绝无限等待）
+  // 倒计时归零 → 本地立即判过期并停止轮询（不等源站，杜绝无限等待）
   useEffect(() => {
-    if (!open || mode !== "qrcode" || phase !== "waiting" || countdown > 0) return
+    if (!open || mode !== "qrcode" || (phase !== "waiting" && phase !== "scanned") || countdown > 0)
+      return
     Promise.resolve().then(() => {
       setPhase("expired")
     })
   }, [open, mode, phase, countdown])
 
-  // 二维码 iframe 加载超时检测：超时判定加载失败（而不是一直「等待扫码」）
+  // 二维码图片加载超时检测：超时判定加载失败（而不是一直「等待扫码」）
   useEffect(() => {
-    if (!open || mode !== "qrcode" || phase !== "waiting" || !qr) return
+    if (!open || mode !== "qrcode" || (phase !== "waiting" && phase !== "scanned") || !qr) return
     const t = setTimeout(() => {
       if (!qrLoadedRef.current) {
         setPhase("error")
-        setErrorMsg("二维码加载超时：无法访问微信开放平台，请刷新重试或改用手动粘贴")
+        setErrorMsg("二维码图片加载超时，请刷新重试或改用手动粘贴")
       }
     }, QR_LOAD_TIMEOUT)
     return () => clearTimeout(t)
   }, [open, mode, phase, qr])
 
-  // 轮询扫码状态（服务端代查哲风接口）；连续失败达到阈值即停止，不再无限等待
+  // 轮询扫码状态（服务端后台已在长轮询微信，这里每 2 秒查一次会话状态）
   useEffect(() => {
-    if (!open || mode !== "qrcode" || phase !== "waiting" || !qr) return
+    if (!open || mode !== "qrcode" || (phase !== "waiting" && phase !== "scanned") || !qr) return
     let stopped = false
     const timer = setInterval(
       () => {
@@ -238,11 +220,17 @@ export function TokenSettingsDialog({
               setPhase("ok")
               toast.success("扫码登录成功，令牌已自动保存")
               void refresh()
+            } else if (data.status === "scanned") {
+              // 已扫码，等待手机上点确认
+              pollFailRef.current = 0
+              setPhase("scanned")
             } else if (data.status === "expired") {
               stopped = true
               setPhase("expired")
             } else if (data.status === "pending") {
               pollFailRef.current = 0
+              // 从「已扫码」回落（用户取消授权等）
+              setPhase("waiting")
             } else {
               // error → 计数；连续多次失败才停止（单次抖动继续轮询）
               pollFailRef.current += 1
@@ -409,7 +397,7 @@ export function TokenSettingsDialog({
                   <p className="text-xs text-muted-foreground">令牌已自动保存，下载原图已解锁高清原图</p>
                 </div>
               ) : phase === "loading" ? (
-                <div className="mx-auto flex h-[344px] w-[240px] items-center justify-center rounded-2xl bg-muted/50">
+                <div className="mx-auto flex size-[252px] items-center justify-center rounded-2xl bg-muted/50">
                   <span className="size-8 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
                 </div>
               ) : phase === "error" ? (
@@ -436,31 +424,44 @@ export function TokenSettingsDialog({
                   </div>
                 </div>
               ) : (
-                <div className="relative mx-auto h-[344px] w-[240px]">
-                  {/* 微信开放平台组件自然尺寸 300×430：整体缩放 0.8 完整显示，不再裁切 */}
+                <div className="relative mx-auto w-fit">
+                  {/* 微信二维码图片直显（服务端提取直链，经本站代理防热链拦截） */}
                   <div
                     className={cn(
-                      "h-[344px] w-[240px] overflow-hidden rounded-2xl border bg-white transition-opacity",
+                      "relative overflow-hidden rounded-2xl border bg-white p-2.5 transition-opacity",
                       phase === "expired" && "opacity-25"
                     )}
                   >
-                    <iframe
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
                       key={qr?.state ?? "qr"}
-                      src={qr?.qrUrl ?? "about:blank"}
-                      title="哲风壁纸微信扫码登录二维码"
-                      width={300}
-                      height={430}
-                      scrolling="no"
-                      frameBorder={0}
-                      style={{ width: 300, height: 430, transform: "scale(0.8)", transformOrigin: "top left" }}
-                      className="block border-0"
+                      src={qr ? `/api/zf-login/qr?state=${encodeURIComponent(qr.state)}` : undefined}
+                      alt="微信扫码登录二维码"
+                      width={230}
+                      height={230}
+                      decoding="async"
                       onLoad={() => {
                         qrLoadedRef.current = true
                       }}
+                      onError={() => {
+                        setPhase("error")
+                        setErrorMsg("二维码图片加载失败，请刷新重试或改用手动粘贴")
+                      }}
+                      className="block size-[230px] bg-white object-contain"
                     />
+                    {/* 已扫码：二维码变暗 + 等待确认提示 */}
+                    {phase === "scanned" && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-2xl bg-white/85 backdrop-blur-[2px]">
+                        <span className="flex size-12 items-center justify-center rounded-full bg-emerald-500/15">
+                          <QrCode className="size-6 text-emerald-600" />
+                        </span>
+                        <p className="text-sm font-bold text-emerald-700">扫码成功</p>
+                        <p className="text-xs text-muted-foreground">请在手机上点击「确认登录」</p>
+                      </div>
+                    )}
                   </div>
                   {/* 等待期间随时可刷新二维码（不必等到过期） */}
-                  {phase === "waiting" && (
+                  {(phase === "waiting" || phase === "scanned") && (
                     <button
                       type="button"
                       onClick={regenQr}
@@ -486,17 +487,28 @@ export function TokenSettingsDialog({
               {phase !== "ok" && phase !== "error" && (
                 <>
                   <p className="mt-3 text-center text-sm font-bold">
-                    {phase === "loading" ? "二维码生成中…" : phase === "expired" ? "二维码已过期" : "等待扫码中～"}
+                    {phase === "loading"
+                      ? "二维码生成中…"
+                      : phase === "expired"
+                        ? "二维码已过期"
+                        : phase === "scanned"
+                          ? "已扫码，等待手机确认"
+                          : "等待扫码中～"}
                   </p>
                   <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-                    <span className="size-1.5 animate-pulse rounded-full bg-primary" />
-                    请用微信扫一扫，并在手机上确认
-                    {phase === "waiting" && countdown > 0 && (
+                    <span
+                      className={cn(
+                        "size-1.5 animate-pulse rounded-full",
+                        phase === "scanned" ? "bg-emerald-500" : "bg-primary"
+                      )}
+                    />
+                    {phase === "scanned" ? "请在手机上点击「确认登录」" : "请用微信扫一扫，并在手机上确认"}
+                    {(phase === "waiting" || phase === "scanned") && countdown > 0 && (
                       <span className="text-[10px]">（{mm}:{ss} 后过期）</span>
                     )}
                   </p>
                   {/* 卡住兜底：随时刷新 / 切换手动粘贴 */}
-                  {phase === "waiting" && (
+                  {(phase === "waiting" || phase === "scanned") && (
                     <p className="mt-1.5 text-center text-[10px] text-muted-foreground">
                       长时间没反应？
                       <button

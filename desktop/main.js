@@ -61,6 +61,35 @@ function dataDir() {
   return process.env.WF_DATA_DIR || app.getPath("userData");
 }
 
+/* ---------------- 设置持久化（自选下载位置等） ---------------- */
+
+function settingsPath() {
+  return path.join(dataDir(), "settings.json");
+}
+
+function readSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(settingsPath(), "utf8")) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSettings(obj) {
+  try {
+    fs.mkdirSync(dataDir(), { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.error("[desktop] 写入设置失败:", e);
+  }
+}
+
+/** 用户自选的下载目录（未设置返回 null） */
+function chosenDownloadDir() {
+  const dir = readSettings().downloadDir;
+  return typeof dir === "string" && dir.trim() ? dir.trim() : null;
+}
+
 /** 首次运行：复制安装包内置的空数据库模板（已含全部表结构） */
 function ensureDatabase() {
   const dir = dataDir();
@@ -183,8 +212,17 @@ function isLocalUrl(url, port) {
   );
 }
 
-/** 下载目录：系统「下载\壁纸工坊」 */
+/** 下载目录：用户自选位置优先，默认系统「下载\壁纸工坊」 */
 function downloadDir() {
+  const chosen = chosenDownloadDir();
+  if (chosen) {
+    try {
+      fs.mkdirSync(chosen, { recursive: true });
+      return chosen;
+    } catch (e) {
+      console.error("[desktop] 自选下载目录不可用，回退默认:", e);
+    }
+  }
   let base;
   try {
     base = app.getPath("downloads");
@@ -194,13 +232,48 @@ function downloadDir() {
   return path.join(base, "壁纸工坊");
 }
 
-/** 网页 → 主进程 IPC：获取/打开下载目录、定位已下载文件（调起磁盘文件管理器） */
+/** 网页 → 主进程 IPC：获取/选择/恢复下载目录、打开目录、定位已下载文件（调起磁盘文件管理器） */
 function setupIpc() {
   ipcMain.handle("wf:get-download-dir", () => {
     try {
       return downloadDir();
     } catch (e) {
       return "";
+    }
+  });
+
+  /** 弹出系统「选择文件夹」对话框；确认后持久化并返回新目录 */
+  ipcMain.handle("wf:choose-download-dir", async () => {
+    try {
+      const result = await dialog.showOpenDialog(win, {
+        title: "选择壁纸保存位置",
+        defaultPath: downloadDir(),
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+        return { ok: false, canceled: true };
+      }
+      const dir = result.filePaths[0];
+      fs.mkdirSync(dir, { recursive: true });
+      const settings = readSettings();
+      settings.downloadDir = dir;
+      writeSettings(settings);
+      console.log("[desktop] 下载位置已更新:", dir);
+      return { ok: true, dir };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  /** 恢复默认下载目录（取消自选） */
+  ipcMain.handle("wf:reset-download-dir", () => {
+    try {
+      const settings = readSettings();
+      delete settings.downloadDir;
+      writeSettings(settings);
+      return { ok: true, dir: downloadDir() };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
     }
   });
 
