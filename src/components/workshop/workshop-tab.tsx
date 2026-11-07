@@ -8,9 +8,11 @@ import {
   Download,
   EyeOff,
   Expand,
+  FolderCog,
   FolderOpen,
   KeyRound,
   RefreshCw,
+  RotateCcw,
   Sparkles,
   Trash2,
   X,
@@ -18,10 +20,12 @@ import {
 import { cn } from "@/lib/utils"
 import { ZHEFENG_CATEGORIES, proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
 import {
+  chooseDesktopDownloadDir,
   fetchDownloadDir,
   getDesktopApp,
   onDesktopDownloadDone,
   openDownloadFolder,
+  resetDesktopDownloadDir,
   revealDownloadedFile,
 } from "@/lib/desktop"
 import { TokenSettingsDialog } from "@/components/workshop/token-settings"
@@ -32,6 +36,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import { Separator } from "@/components/ui/separator"
 
 interface ListState {
   items: ZhefengWallpaper[]
@@ -50,6 +60,99 @@ function downloadUrl(w: ZhefengWallpaper) {
   )}&wtId=${encodeURIComponent(w.id)}`
 }
 
+/* ---------- 网页版自选保存目录（File System Access API，Chrome / Edge 支持） ---------- */
+
+/** 最小类型面：仅用到目录写入能力，避免依赖完整 FSA 类型定义 */
+interface FsWritable {
+  write(data: Blob): Promise<void>
+  close(): Promise<void>
+}
+interface FsFileHandle {
+  createWritable(): Promise<FsWritable>
+}
+interface FsDirHandle {
+  readonly name: string
+  getFileHandle(name: string, options?: { create?: boolean }): Promise<FsFileHandle>
+  queryPermission?(descriptor?: { mode?: "read" | "readwrite" }): Promise<PermissionState>
+  requestPermission?(descriptor?: { mode?: "read" | "readwrite" }): Promise<PermissionState>
+}
+
+/** 当前浏览器是否支持自选本机目录 */
+function supportsDirectoryPicker(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === "function"
+  )
+}
+
+/** 弹出浏览器目录选择器（需用户手势触发），取消 / 被拦截时返回 null */
+async function pickWebDirectory(): Promise<FsDirHandle | null> {
+  if (!supportsDirectoryPicker()) return null
+  try {
+    const picker = (
+      window as unknown as {
+        showDirectoryPicker: (options?: { mode?: "read" | "readwrite" }) => Promise<FsDirHandle>
+      }
+    ).showDirectoryPicker
+    return await picker({ mode: "readwrite" })
+  } catch {
+    return null
+  }
+}
+
+/** 目录内重名自动追加序号：name (1).ext */
+async function uniqueFsName(dir: FsDirHandle, filename: string): Promise<string> {
+  const dot = filename.lastIndexOf(".")
+  const stem = dot === -1 ? filename : filename.slice(0, dot)
+  const ext = dot === -1 ? "" : filename.slice(dot)
+  let candidate = filename
+  for (let i = 0; i < 999; i++) {
+    try {
+      await dir.getFileHandle(candidate, { create: false }) // 已存在 → 试下一个
+      candidate = i === 0 ? `${stem} (1)${ext}` : `${stem} (${i + 1})${ext}`
+    } catch {
+      return candidate // 不存在 → 可用
+    }
+  }
+  return `${stem}-${Date.now()}${ext}`
+}
+
+/** 经自选目录直写文件（成功 true；权限丢失 / 失败 false → 调用方回退浏览器下载） */
+async function saveToDirectory(dir: FsDirHandle, w: ZhefengWallpaper): Promise<boolean> {
+  try {
+    if (dir.queryPermission) {
+      const p = await dir.queryPermission({ mode: "readwrite" })
+      if (p !== "granted" && dir.requestPermission) {
+        const r = await dir.requestPermission({ mode: "readwrite" })
+        if (r !== "granted") return false
+      }
+    }
+    const res = await fetch(downloadUrl(w), { cache: "no-store" })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const blob = await res.blob()
+    // 文件名优先取服务端 Content-Disposition（与桌面版一致的清洗名）
+    const cd = res.headers.get("content-disposition") ?? ""
+    const m = /filename\*=UTF-8''([^;]+)/.exec(cd)
+    const dot = w.src.lastIndexOf(".")
+    const fallbackExt = dot === -1 ? "png" : w.src.slice(dot + 1)
+    const filename = m
+      ? decodeURIComponent(m[1])
+      : `${w.title.replace(/[\\/:*?"<>|]/g, " ") || "wallpaper"}.${fallbackExt}`
+    const fh = await dir.getFileHandle(await uniqueFsName(dir, filename), { create: true })
+    const stream = await fh.createWritable()
+    await stream.write(blob)
+    await stream.close()
+    return true
+  } catch (e) {
+    console.warn("[workshop] 写入自选目录失败，回退浏览器下载:", e)
+    return false
+  }
+}
+
+/** 下载位置菜单项样式 */
+const DL_MENU_BTN =
+  "inline-flex h-8 w-full items-center gap-2 rounded-md px-2 text-xs font-semibold text-foreground/90 transition-colors hover:bg-accent hover:text-foreground"
+
 /**
  * 壁纸工坊主界面：壁纸数据实时来自哲风壁纸（haowallpaper.com）。
  * 分类切换 + 无限滚动 + 已下载自动隐藏 + 多选批量下载。
@@ -62,6 +165,8 @@ export function WorkshopTab() {
   const [preview, setPreview] = useState<ZhefengWallpaper | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [tokenOpen, setTokenOpen] = useState(false)
+  /** 下载位置菜单开合 */
+  const [dlMenuOpen, setDlMenuOpen] = useState(false)
   /** 下载过的图片不再显示（默认开启，可临时关闭查看） */
   const [hideDownloaded, setHideDownloaded] = useState(true)
   const [downloadedCount, setDownloadedCount] = useState(0)
@@ -71,8 +176,17 @@ export function WorkshopTab() {
   const seqRef = useRef(0)
   /** 桌面版下载保存目录（网页版为 null） */
   const [dlDir, setDlDir] = useState<string | null>(null)
+  /** 网页版自选的本机保存目录名（File System Access；桌面版恒 null 走 Electron） */
+  const [webDirName, setWebDirName] = useState<string | null>(null)
   /** 下载完成提示防抖合并（批量下载 N 张 → 合并为一条「已保存 N 张」） */
   const dlToastRef = useRef<{ count: number; lastAt: number; timer: ReturnType<typeof setTimeout> | null }>({
+    count: 0,
+    lastAt: 0,
+    timer: null,
+  })
+  /** 网页版自选目录句柄 + 直写完成提示防抖合并 */
+  const webDirRef = useRef<FsDirHandle | null>(null)
+  const fsToastRef = useRef<{ count: number; lastAt: number; timer: ReturnType<typeof setTimeout> | null }>({
     count: 0,
     lastAt: 0,
     timer: null,
@@ -230,13 +344,52 @@ export function WorkshopTab() {
     })
   }
 
-  /** 触发一个下载（隐藏 iframe 导航方式，不弹新页） */
-  const triggerDownload = (w: ZhefengWallpaper) => {
+  /** 隐藏 iframe 导航下载（浏览器默认目录 / Electron 静默保存到自选目录） */
+  const iframeDownload = (w: ZhefengWallpaper) => {
     const frame = document.createElement("iframe")
     frame.style.display = "none"
     frame.src = downloadUrl(w)
     document.body.appendChild(frame)
     setTimeout(() => frame.remove(), 120000)
+  }
+
+  /** 网页版直写完成提示（批量合并为一条「已保存 N 张」） */
+  const notifyFsSaved = () => {
+    const agg = fsToastRef.current
+    const now = Date.now()
+    if (now - agg.lastAt > 10_000) agg.count = 0
+    agg.lastAt = now
+    agg.count += 1
+    const total = agg.count
+    if (agg.timer) clearTimeout(agg.timer)
+    agg.timer = setTimeout(() => {
+      agg.timer = null
+      agg.count = 0
+      toast.success(total > 1 ? `已保存 ${total} 张壁纸到自选目录` : "壁纸已保存到自选目录", {
+        id: "wf-fs-saved",
+        description: webDirName ? `保存位置：${webDirName}` : undefined,
+        duration: 6000,
+      })
+    }, 700)
+  }
+
+  /** 触发一个下载：网页自选目录直写 > 隐藏 iframe 导航（浏览器 / Electron 接管） */
+  const triggerDownload = (w: ZhefengWallpaper) => {
+    const dir = webDirRef.current
+    if (dir && !getDesktopApp()) {
+      void (async () => {
+        if (await saveToDirectory(dir, w)) {
+          notifyFsSaved()
+        } else {
+          iframeDownload(w)
+          toast.info("本张改由浏览器下载（自选目录权限已失效），可在「下载位置」重新选择", {
+            duration: 5000,
+          })
+        }
+      })()
+      return
+    }
+    iframeDownload(w)
   }
 
   /** 打开下载目录（桌面版调起磁盘文件管理器；网页版说明浏览器下载位置） */
@@ -249,8 +402,57 @@ export function WorkshopTab() {
     }
     toast.info("网页版下载由浏览器保存", {
       description:
-        "默认在系统「下载」文件夹。安装桌面版后会自动整理到「下载\\壁纸工坊」，支持一键打开定位。",
+        "默认在系统「下载」文件夹；点「下载位置 → 选择保存位置」可自选文件夹（Chrome / Edge）。安装桌面版后自动整理并支持持久自选。",
       duration: 6000,
+    })
+  }
+
+  /** 更改 / 选择保存位置（桌面版：系统对话框 + 持久化；网页版：File System Access） */
+  const handleChooseDir = async () => {
+    if (getDesktopApp()) {
+      const r = await chooseDesktopDownloadDir()
+      if (r && r.ok && r.dir) {
+        setDlDir(r.dir)
+        toast.success("保存位置已更新", { description: r.dir, duration: 6000 })
+      } else if (r && !r.ok && r.error) {
+        toast.error("更改保存位置失败", { description: r.error })
+      }
+      return // 用户取消（canceled）不打扰
+    }
+    if (!supportsDirectoryPicker()) {
+      toast.info("当前浏览器不支持自选保存位置", {
+        description: "可改用 Chrome / Edge，或安装桌面版自由选择保存位置。",
+        duration: 6000,
+      })
+      return
+    }
+    const dir = await pickWebDirectory()
+    if (!dir) return // 用户取消 / 浏览器拦截
+    webDirRef.current = dir
+    setWebDirName(dir.name)
+    toast.success(`已选择保存位置：${dir.name}`, {
+      description: "之后下载的壁纸将直接保存到该文件夹（本次会话内有效）。",
+      duration: 6000,
+    })
+  }
+
+  /** 恢复默认保存位置（桌面版：下载\\壁纸工坊；网页版：浏览器默认下载） */
+  const handleResetDir = async () => {
+    if (getDesktopApp()) {
+      const r = await resetDesktopDownloadDir()
+      if (r && r.ok && r.dir) {
+        setDlDir(r.dir)
+        toast.success("已恢复默认保存位置", { description: r.dir, duration: 6000 })
+      } else if (r && !r.ok && r.error) {
+        toast.error("恢复默认位置失败", { description: r.error })
+      }
+      return
+    }
+    webDirRef.current = null
+    setWebDirName(null)
+    toast.info("已改回浏览器默认下载", {
+      description: "壁纸将保存到浏览器「下载」文件夹。",
+      duration: 5000,
     })
   }
 
@@ -259,7 +461,11 @@ export function WorkshopTab() {
     if (selected.length === 0) return
     selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 400))
     toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
-      description: dlDir ? `保存位置：${dlDir}，完成后可点「打开文件夹」` : undefined,
+      description: dlDir
+        ? `保存位置：${dlDir}，完成后可点「打开文件夹」`
+        : webDirName
+          ? `保存位置：${webDirName}`
+          : undefined,
       duration: 6000,
     })
     // 乐观移除：稍后刷新列表让服务端记录生效
@@ -291,6 +497,7 @@ export function WorkshopTab() {
   }
 
   const isPhone = cat.wpType === 2
+  const isDesktop = Boolean(getDesktopApp())
   const showSkeleton = list.page === 0 && (list.loading || !list.error)
 
   return (
@@ -310,26 +517,123 @@ export function WorkshopTab() {
             <KeyRound className="size-3.5" />
             令牌设置
           </button>
-          {/* 下载位置：桌面版直接调起磁盘文件夹；网页版说明浏览器默认下载目录 */}
-          <button
-            type="button"
-            onClick={() => void handleOpenDownloads()}
-            title={dlDir ?? "查看壁纸下载保存位置"}
-            aria-label={`打开壁纸下载文件夹${dlDir ? `：${dlDir}` : ""}`}
-            className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-          >
-            <FolderOpen className="size-3.5" />
-            下载位置
-          </button>
+          {/* 下载位置：打开 / 更改 / 恢复默认（桌面版系统对话框持久化；网页版 File System Access） */}
+          <Popover open={dlMenuOpen} onOpenChange={setDlMenuOpen}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                title={dlDir ?? webDirName ?? "查看壁纸下载保存位置"}
+                aria-label={`壁纸下载保存位置${dlDir ? `：${dlDir}` : webDirName ? `：${webDirName}` : ""}`}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+              >
+                <FolderOpen className="size-3.5" />
+                下载位置
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-72 p-2">
+              <p className="px-2 pb-1 pt-1.5 text-[11px] font-bold text-muted-foreground">当前保存位置</p>
+              <p className="break-all px-2 pb-2 text-xs leading-relaxed">
+                {isDesktop
+                  ? (dlDir ?? "系统「下载\\壁纸工坊」")
+                  : webDirName
+                    ? `本机文件夹「${webDirName}」`
+                    : "浏览器默认「下载」文件夹"}
+              </p>
+              <Separator className="my-1" />
+              <div className="flex flex-col gap-0.5">
+                {isDesktop ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDlMenuOpen(false)
+                        void handleOpenDownloads()
+                      }}
+                      className={DL_MENU_BTN}
+                    >
+                      <FolderOpen className="size-3.5 shrink-0" />
+                      打开下载文件夹
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDlMenuOpen(false)
+                        void handleChooseDir()
+                      }}
+                      className={DL_MENU_BTN}
+                    >
+                      <FolderCog className="size-3.5 shrink-0" />
+                      更改保存位置…
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDlMenuOpen(false)
+                        void handleResetDir()
+                      }}
+                      className={DL_MENU_BTN}
+                    >
+                      <RotateCcw className="size-3.5 shrink-0" />
+                      恢复默认「下载\\壁纸工坊」
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {supportsDirectoryPicker() ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDlMenuOpen(false)
+                          void handleChooseDir()
+                        }}
+                        className={DL_MENU_BTN}
+                      >
+                        <FolderCog className="size-3.5 shrink-0" />
+                        选择保存位置（本机）…
+                      </button>
+                    ) : (
+                      <p className="px-2 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                        当前浏览器不支持自选位置，可改用 Chrome / Edge 或安装桌面版（支持自选保存位置）。
+                      </p>
+                    )}
+                    {webDirName && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDlMenuOpen(false)
+                          void handleResetDir()
+                        }}
+                        className={DL_MENU_BTN}
+                      >
+                        <RotateCcw className="size-3.5 shrink-0" />
+                        改回浏览器默认下载
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDlMenuOpen(false)
+                        void handleOpenDownloads()
+                      }}
+                      className={DL_MENU_BTN}
+                    >
+                      <FolderOpen className="size-3.5 shrink-0" />
+                      查看下载说明
+                    </button>
+                  </>
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
-        <p className="flex items-center gap-1 text-sm text-muted-foreground">
-          <Sparkles className="size-3.5 shrink-0 text-primary" />
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          <Sparkles className="mr-1 inline size-3.5 align-[-2px] text-primary" />
           壁纸实时获取自
           <a
             href="https://haowallpaper.com"
             target="_blank"
             rel="noreferrer"
-            className="font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+            className="whitespace-nowrap font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
           >
             哲风壁纸
           </a>
@@ -624,6 +928,7 @@ export function WorkshopTab() {
           toast.success(selected.some((p) => p.id === w.id) ? "已取消选择" : "已加入选择")
         }}
         onDownloaded={(w) => {
+          triggerDownload(w)
           onDownloadOne(w)
           setPreview(null)
         }}
@@ -692,14 +997,14 @@ function WallpaperPreviewDialog({
                 </div>
               )}
               <div className="mt-4 grid grid-cols-2 gap-2">
-                <a
-                  href={downloadUrl(wallpaper)}
+                <button
+                  type="button"
                   onClick={() => onDownloaded(wallpaper)}
                   className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-primary text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95"
                 >
                   <Download className="size-3.5" />
                   下载原图
-                </a>
+                </button>
                 <button
                   type="button"
                   onClick={() => onToggle(wallpaper)}

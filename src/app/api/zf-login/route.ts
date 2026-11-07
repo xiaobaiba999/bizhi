@@ -5,7 +5,6 @@ import {
   newState,
   pollStateLogin,
   probeLoginEndpoints,
-  qrImageUrl,
   startQrSession,
 } from "@/lib/zf-login"
 
