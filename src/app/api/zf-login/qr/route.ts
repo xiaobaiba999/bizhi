@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
-import { qrImageUrl } from "@/lib/zf-login"
+import { qrImageUrl, qrRefererUrl } from "@/lib/zf-login"
 
 /**
  * GET /api/zf-login/qr?state=<state> —— 二维码图片代理
  * 直接透传微信开放平台的二维码 JPEG（避免浏览器端 referer / 热链限制）。
+ * Referer 使用发起会话时的完整 qrconnect 页面 URL（与真实微信页面行为一致）。
  */
 export async function GET(req: NextRequest) {
   const state = req.nextUrl.searchParams.get("state") ?? ""
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        Referer: "https://open.weixin.qq.com/",
+        Referer: qrRefererUrl(state) ?? "https://open.weixin.qq.com/connect/qrconnect",
       },
       signal: AbortSignal.timeout(10000),
       cache: "no-store",

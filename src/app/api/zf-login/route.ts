@@ -84,7 +84,7 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json(
-    { status: result.status, msg: result.msg ?? null },
+    { status: result.status, msg: result.msg ?? null, diag: result.diag ?? null },
     { headers: { "Cache-Control": "no-store" } }
   )
 }

@@ -41,7 +41,7 @@ interface QrSession {
 
 type QrPhase = "loading" | "waiting" | "scanned" | "ok" | "expired" | "error"
 
-const QR_TTL = 120
+const QR_TTL = 170
 /** 二维码图片加载超时：超时判定「二维码显示失败」，不再停留在等待页 */
 const QR_LOAD_TIMEOUT = 12000
 /** 轮询连续失败阈值：达到即停止并报错（约 6 秒内给出明确反馈，杜绝无限等待） */
@@ -80,6 +80,8 @@ export function TokenSettingsDialog({
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [countdown, setCountdown] = useState(QR_TTL)
   const [qrNonce, setQrNonce] = useState(0)
+  /** 已扫码阶段的服务端过程提示（如「授权已确认，正在获取令牌」） */
+  const [scannedNote, setScannedNote] = useState<string | null>(null)
   /** 二维码 iframe 是否已触发 load 事件 */
   const qrLoadedRef = useRef(false)
   /** 轮询连续失败计数 */
@@ -106,6 +108,7 @@ export function TokenSettingsDialog({
       setQr(null)
       setPhase("loading")
       setErrorMsg(null)
+      setScannedNote(null)
       setCountdown(QR_TTL)
       qrLoadedRef.current = false
       pollFailRef.current = 0
@@ -124,6 +127,7 @@ export function TokenSettingsDialog({
       setPhase("loading")
       setCountdown(QR_TTL)
       setErrorMsg(null)
+      setScannedNote(null)
       qrLoadedRef.current = false
       pollFailRef.current = 0
       void (async () => {
@@ -221,9 +225,10 @@ export function TokenSettingsDialog({
               toast.success("扫码登录成功，令牌已自动保存")
               void refresh()
             } else if (data.status === "scanned") {
-              // 已扫码，等待手机上点确认
+              // 已扫码（或已确认授权，服务端正在换取令牌）
               pollFailRef.current = 0
               setPhase("scanned")
+              if (typeof data.msg === "string" && data.msg) setScannedNote(data.msg)
             } else if (data.status === "expired") {
               stopped = true
               setPhase("expired")
@@ -456,7 +461,7 @@ export function TokenSettingsDialog({
                           <QrCode className="size-6 text-emerald-600" />
                         </span>
                         <p className="text-sm font-bold text-emerald-700">扫码成功</p>
-                        <p className="text-xs text-muted-foreground">请在手机上点击「确认登录」</p>
+                        <p className="text-xs text-muted-foreground">{scannedNote ?? "请在手机上点击「确认登录」"}</p>
                       </div>
                     )}
                   </div>
@@ -502,7 +507,7 @@ export function TokenSettingsDialog({
                         phase === "scanned" ? "bg-emerald-500" : "bg-primary"
                       )}
                     />
-                    {phase === "scanned" ? "请在手机上点击「确认登录」" : "请用微信扫一扫，并在手机上确认"}
+                    {phase === "scanned" ? scannedNote ?? "已扫码，正在等待确认结果…" : "请用微信扫一扫，并在手机上确认"}
                     {(phase === "waiting" || phase === "scanned") && countdown > 0 && (
                       <span className="text-[10px]">（{mm}:{ss} 后过期）</span>
                     )}
