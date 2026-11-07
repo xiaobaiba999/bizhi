@@ -10,14 +10,12 @@ import {
   Expand,
   KeyRound,
   RefreshCw,
-  Send,
   Sparkles,
   Trash2,
   X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ZHEFENG_CATEGORIES, proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
-import { useAppStore } from "@/lib/app-store"
 import { TokenSettingsDialog } from "@/components/workshop/token-settings"
 import { SelectionPanel } from "@/components/workshop/selection-panel"
 import {
@@ -46,7 +44,7 @@ function downloadUrl(w: ZhefengWallpaper) {
 
 /**
  * 壁纸工坊主界面：壁纸数据实时来自哲风壁纸（haowallpaper.com）。
- * 分类切换 + 无限滚动 + 已下载自动隐藏 + 多选联动（发布小红书 / 批量下载）。
+ * 分类切换 + 无限滚动 + 已下载自动隐藏 + 多选批量下载。
  */
 export function WorkshopTab() {
   const [catKey, setCatKey] = useState("recommend")
@@ -59,8 +57,6 @@ export function WorkshopTab() {
   /** 下载过的图片不再显示（默认开启，可临时关闭查看） */
   const [hideDownloaded, setHideDownloaded] = useState(true)
   const [downloadedCount, setDownloadedCount] = useState(0)
-
-  const goPublish = useAppStore((s) => s.goPublish)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -170,13 +166,6 @@ export function WorkshopTab() {
     })
   }
 
-  const publishSelected = () => {
-    goPublish(selected.map((w) => w.src))
-    toast.success(`已暂存 ${selected.length} 张壁纸，去小红书创作者中心发布吧`)
-    // 图片已进入暂存架（全屏接管后可见），清空选择避免重复发布
-    setSelected([])
-  }
-
   /** 触发一个下载（隐藏 iframe 导航方式，不弹新页） */
   const triggerDownload = (w: ZhefengWallpaper) => {
     const frame = document.createElement("iframe")
@@ -251,7 +240,7 @@ export function WorkshopTab() {
           >
             哲风壁纸
           </a>
-          ，下载原图、发布小红书，下载过的自动隐藏
+          ，下载原图，下载过的自动隐藏
         </p>
       </div>
 
@@ -477,14 +466,13 @@ export function WorkshopTab() {
       </div>
         </div>
 
-      {/* 右侧面板：已选壁纸清单 + 发布 / 批量下载 */}
+      {/* 右侧面板：已选壁纸清单 + 批量下载 */}
       <aside className="hidden md:block md:w-[280px] md:shrink-0 lg:w-[310px]">
         <div className="md:sticky md:top-20">
           <SelectionPanel
             items={selected}
             isPhone={isPhone}
             onRemove={toggle}
-            onPublish={publishSelected}
             onBatchDownload={batchDownload}
             onClear={() => setSelected([])}
           />
@@ -509,16 +497,8 @@ export function WorkshopTab() {
             </p>
             <button
               type="button"
-              onClick={publishSelected}
-              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95 sm:px-5"
-            >
-              <Send className="size-3.5" />
-              发布到小红书
-            </button>
-            <button
-              type="button"
               onClick={batchDownload}
-              className="inline-flex h-9 items-center gap-1.5 rounded-full border-2 border-primary/60 px-4 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95 sm:px-5"
+              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95 sm:px-5"
             >
               <Download className="size-3.5" />
               批量下载
@@ -548,11 +528,6 @@ export function WorkshopTab() {
           toggle(w)
           toast.success(selected.some((p) => p.id === w.id) ? "已取消选择" : "已加入选择")
         }}
-        onPublish={(w) => {
-          goPublish([w.src])
-          setPreview(null)
-          toast.success("已暂存壁纸，去小红书创作者中心发布吧")
-        }}
         onDownloaded={(w) => {
           onDownloadOne(w)
           setPreview(null)
@@ -562,14 +537,13 @@ export function WorkshopTab() {
   )
 }
 
-/** 壁纸大图预览：原图查看 / 下载 / 选择 / 发布 */
+/** 壁纸大图预览：原图查看 / 下载 / 选择 */
 function WallpaperPreviewDialog({
   wallpaper,
   imgLoading,
   onImgLoaded,
   onClose,
   onToggle,
-  onPublish,
   onDownloaded,
 }: {
   wallpaper: ZhefengWallpaper | null
@@ -577,7 +551,6 @@ function WallpaperPreviewDialog({
   onImgLoaded: () => void
   onClose: () => void
   onToggle: (w: ZhefengWallpaper) => void
-  onPublish: (w: ZhefengWallpaper) => void
   onDownloaded: (w: ZhefengWallpaper) => void
 }) {
   return (
@@ -623,7 +596,7 @@ function WallpaperPreviewDialog({
                   ))}
                 </div>
               )}
-              <div className="mt-4 grid grid-cols-3 gap-2">
+              <div className="mt-4 grid grid-cols-2 gap-2">
                 <a
                   href={downloadUrl(wallpaper)}
                   onClick={() => onDownloaded(wallpaper)}
@@ -639,14 +612,6 @@ function WallpaperPreviewDialog({
                 >
                   <Check className="size-3.5" />
                   加入选择
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onPublish(wallpaper)}
-                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border-2 border-primary/60 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95"
-                >
-                  <Send className="size-3.5" />
-                  去发布
                 </button>
               </div>
               <p className="mt-2.5 text-center text-[10px] text-muted-foreground">

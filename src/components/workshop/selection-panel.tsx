@@ -1,6 +1,6 @@
 "use client"
 
-import { Download, ImageIcon, MousePointerClick, Send, X } from "lucide-react"
+import { Download, ImageIcon, MousePointerClick, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
 
@@ -9,20 +9,18 @@ interface SelectionPanelProps {
   /** 当前分类是否为竖版手机壁纸（决定缩略图比例） */
   isPhone: boolean
   onRemove: (w: ZhefengWallpaper) => void
-  onPublish: () => void
   onBatchDownload: () => void
   onClear: () => void
 }
 
 /**
- * 工坊右侧面板：已选壁纸清单 + 发布小红书 / 批量下载。
+ * 工坊右侧面板：已选壁纸清单 + 批量下载原图。
  * md 起常驻右侧（避免窄断点下不显示），移动端由底部悬浮操作栏替代。
  */
 export function SelectionPanel({
   items,
   isPhone,
   onRemove,
-  onPublish,
   onBatchDownload,
   onClear,
 }: SelectionPanelProps) {
@@ -56,7 +54,7 @@ export function SelectionPanel({
           </span>
           <p className="text-xs font-semibold text-muted-foreground">还没有选中壁纸</p>
           <p className="max-w-[13rem] text-[11px] leading-relaxed text-muted-foreground/80">
-            点击左侧壁纸加入选择（最多 18 张），选好后在这里一键发布到小红书或批量下载
+            点击左侧壁纸加入选择（最多 18 张），选好后在这里一键批量下载原图
           </p>
         </div>
       ) : (
@@ -82,11 +80,6 @@ export function SelectionPanel({
                     decoding="async"
                     className="size-full object-cover"
                   />
-                  {i === 0 && (
-                    <span className="absolute bottom-0.5 left-0.5 rounded bg-primary px-1 py-px text-[8px] font-bold text-primary-foreground">
-                      封面
-                    </span>
-                  )}
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-xs font-semibold">
@@ -113,19 +106,11 @@ export function SelectionPanel({
           <div className="shrink-0 space-y-2 border-t p-3">
             <button
               type="button"
-              onClick={onPublish}
+              onClick={onBatchDownload}
               className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-full bg-primary text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
             >
-              <Send className="size-4" />
-              发布到小红书（{items.length} 张）
-            </button>
-            <button
-              type="button"
-              onClick={onBatchDownload}
-              className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-full border-2 border-primary/60 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-[0.98]"
-            >
               <Download className="size-4" />
-              批量下载原图
+              批量下载原图（{items.length} 张）
             </button>
             <button
               type="button"

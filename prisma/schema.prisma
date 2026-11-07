@@ -7,37 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 发布笔记（图片、文案、自主声明、添加组件等均为发布时可选内容）
-model Note {
-  id            String    @id @default(cuid())
-  title         String    // 标题（≤20字）
-  body          String    // 正文文案
-  images        String    // JSON 字符串数组：图片 src 列表（首张为封面）
-  declaration   String?   // 自主声明：fiction | brand | repost | null(无)
-  location      String?   // 添加组件-位置
-  topics        String?   // 添加组件-话题 JSON 数组
-  mentions      String?   // 添加组件-@提及 JSON 数组
-  collection    String?   // 添加组件-合集
-  visibility    String    @default("public") // public | fans | friends | private
-  allowComments Boolean   @default(true)
-  scheduledAt   DateTime? // 添加组件-定时发布时间
-  status        String    @default("published") // published | scheduled
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-}
-
-// 夸克网盘：云文件（壁纸保存 / 本地上传）
-model CloudFile {
-  id        String    @id @default(cuid())
-  name      String    // 文件名（含扩展名）
-  src       String?   // 预览地址：/gallery/** 或 data:image/**；归档类为 null
-  kind      String    @default("image") // image | archive
-  size      Int       // 字节数
-  shareCode String?   // 分享码（生成后可复制 pan.quark.cn/s/xxx）
-  sharedAt  DateTime?
-  createdAt DateTime  @default(now())
-}
-
 // 哲风壁纸登录令牌（仅保存在本地数据库，用于下载原图鉴权）
 model ZfToken {
   id        String   @id @default(cuid())

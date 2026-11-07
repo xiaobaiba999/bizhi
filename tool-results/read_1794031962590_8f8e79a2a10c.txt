@@ -1,0 +1,662 @@
+     1→"use client"
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from "react"
+     4→import { motion, AnimatePresence } from "framer-motion"
+     5→import { toast } from "sonner"
+     6→import {
+     7→  Check,
+     8→  Download,
+     9→  EyeOff,
+    10→  Expand,
+    11→  KeyRound,
+    12→  RefreshCw,
+    13→  Send,
+    14→  Sparkles,
+    15→  Trash2,
+    16→  X,
+    17→} from "lucide-react"
+    18→import { cn } from "@/lib/utils"
+    19→import { ZHEFENG_CATEGORIES, proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
+    20→import { useAppStore } from "@/lib/app-store"
+    21→import { TokenSettingsDialog } from "@/components/workshop/token-settings"
+    22→import { SelectionPanel } from "@/components/workshop/selection-panel"
+    23→import {
+    24→  Dialog,
+    25→  DialogContent,
+    26→  DialogHeader,
+    27→  DialogTitle,
+    28→} from "@/components/ui/dialog"
+    29→
+    30→interface ListState {
+    31→  items: ZhefengWallpaper[]
+    32→  page: number
+    33→  hasMore: boolean
+    34→  loading: boolean
+    35→  error: string | null
+    36→}
+    37→
+    38→const INITIAL: ListState = { items: [], page: 0, hasMore: true, loading: false, error: null }
+    39→
+    40→/** 下载原图代理链接（带 wtId：有令牌时走官网原图直链） */
+    41→function downloadUrl(w: ZhefengWallpaper) {
+    42→  return `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
+    43→    w.title
+    44→  )}&wtId=${encodeURIComponent(w.id)}`
+    45→}
+    46→
+    47→/**
+    48→ * 壁纸工坊主界面：壁纸数据实时来自哲风壁纸（haowallpaper.com）。
+    49→ * 分类切换 + 无限滚动 + 已下载自动隐藏 + 多选联动（发布小红书 / 批量下载）。
+    50→ */
+    51→export function WorkshopTab() {
+    52→  const [catKey, setCatKey] = useState("recommend")
+    53→  const [reloadNonce, setReloadNonce] = useState(0)
+    54→  const [list, setList] = useState<ListState>(INITIAL)
+    55→  const [selected, setSelected] = useState<ZhefengWallpaper[]>([])
+    56→  const [preview, setPreview] = useState<ZhefengWallpaper | null>(null)
+    57→  const [previewLoading, setPreviewLoading] = useState(false)
+    58→  const [tokenOpen, setTokenOpen] = useState(false)
+    59→  /** 下载过的图片不再显示（默认开启，可临时关闭查看） */
+    60→  const [hideDownloaded, setHideDownloaded] = useState(true)
+    61→  const [downloadedCount, setDownloadedCount] = useState(0)
+    62→
+    63→  const goPublish = useAppStore((s) => s.goPublish)
+    64→
+    65→  const scrollRef = useRef<HTMLDivElement>(null)
+    66→  const sentinelRef = useRef<HTMLDivElement>(null)
+    67→  const seqRef = useRef(0)
+    68→
+    69→  const cat = ZHEFENG_CATEGORIES.find((c) => c.key === catKey) ?? ZHEFENG_CATEGORIES[0]
+    70→
+    71→  /** 拉取下一页壁纸（loading/hasMore 守卫 + seq 防过期响应 + 追加去重） */
+    72→  const loadMore = useCallback(async () => {
+    73→    if (list.loading || !list.hasMore || list.page === 0) return
+    74→    const seq = ++seqRef.current
+    75→    setList((s) => ({ ...s, loading: true, error: null }))
+    76→
+    77→    try {
+    78→      const nextPage = list.page + 1
+    79→      const res = await fetch(
+    80→        `/api/wallpapers?cat=${catKey}&page=${nextPage}&hideDownloaded=${hideDownloaded ? 1 : 0}`,
+    81→        { cache: "no-store" }
+    82→      )
+    83→      if (!res.ok) {
+    84→        const msg = await res.json().catch(() => null)
+    85→        throw new Error(msg?.error ?? "抓取失败")
+    86→      }
+    87→      const data: { items: ZhefengWallpaper[]; hasMore: boolean; downloadedCount?: number } =
+    88→        await res.json()
+    89→      if (seq !== seqRef.current) return
+    90→
+    91→      setList((s) => {
+    92→        const known = new Set(s.items.map((i) => i.id))
+    93→        return {
+    94→          items: [...s.items, ...data.items.filter((i) => !known.has(i.id))],
+    95→          page: nextPage,
+    96→          hasMore: data.hasMore && data.items.length > 0,
+    97→          loading: false,
+    98→          error: null,
+    99→        }
+   100→      })
+   101→      if (typeof data.downloadedCount === "number") setDownloadedCount(data.downloadedCount)
+   102→    } catch (e) {
+   103→      if (seq !== seqRef.current) return
+   104→      setList((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : "抓取失败" }))
+   105→    }
+   106→  }, [catKey, list.page, list.loading, list.hasMore, hideDownloaded])
+   107→
+   108→  // 切换分类 / 手动重试 / 切换「隐藏已下载」时重置列表并重新抓取第一页
+   109→  useEffect(() => {
+   110→    seqRef.current++
+   111→    const seq = seqRef.current
+   112→    setList(INITIAL)
+   113→    ;(async () => {
+   114→      try {
+   115→        const res = await fetch(
+   116→          `/api/wallpapers?cat=${catKey}&page=1&hideDownloaded=${hideDownloaded ? 1 : 0}`,
+   117→          { cache: "no-store" }
+   118→        )
+   119→        if (!res.ok) {
+   120→          const msg = await res.json().catch(() => null)
+   121→          throw new Error(msg?.error ?? "抓取失败")
+   122→        }
+   123→        const data: { items: ZhefengWallpaper[]; hasMore: boolean; downloadedCount?: number } =
+   124→          await res.json()
+   125→        if (seq !== seqRef.current) return
+   126→        setList({
+   127→          items: data.items,
+   128→          page: 1,
+   129→          hasMore: data.hasMore && data.items.length > 0,
+   130→          loading: false,
+   131→          error: null,
+   132→        })
+   133→        if (typeof data.downloadedCount === "number") setDownloadedCount(data.downloadedCount)
+   134→      } catch (e) {
+   135→        if (seq !== seqRef.current) return
+   136→        setList({
+   137→          items: [],
+   138→          page: 0,
+   139→          hasMore: true,
+   140→          loading: false,
+   141→          error: e instanceof Error ? e.message : "抓取失败",
+   142→        })
+   143→      }
+   144→    })()
+   145→  }, [catKey, reloadNonce, hideDownloaded])
+   146→
+   147→  // 无限滚动：哨兵进入可视区即加载下一页
+   148→  useEffect(() => {
+   149→    const el = sentinelRef.current
+   150→    const root = scrollRef.current
+   151→    if (!el || !root) return
+   152→    const io = new IntersectionObserver(
+   153→      (entries) => {
+   154→        if (entries.some((en) => en.isIntersecting)) void loadMore()
+   155→      },
+   156→      { root, rootMargin: "400px 0px" }
+   157→    )
+   158→    io.observe(el)
+   159→    return () => io.disconnect()
+   160→  }, [loadMore])
+   161→
+   162→  const toggle = (w: ZhefengWallpaper) => {
+   163→    setSelected((prev) => {
+   164→      if (prev.some((p) => p.id === w.id)) return prev.filter((p) => p.id !== w.id)
+   165→      if (prev.length >= 18) {
+   166→        toast.error("最多选择 18 张")
+   167→        return prev
+   168→      }
+   169→      return [...prev, w]
+   170→    })
+   171→  }
+   172→
+   173→  const publishSelected = () => {
+   174→    goPublish(selected.map((w) => w.src))
+   175→    toast.success(`已暂存 ${selected.length} 张壁纸，去小红书创作者中心发布吧`)
+   176→    // 图片已进入暂存架（全屏接管后可见），清空选择避免重复发布
+   177→    setSelected([])
+   178→  }
+   179→
+   180→  /** 触发一个下载（隐藏 iframe 导航方式，不弹新页） */
+   181→  const triggerDownload = (w: ZhefengWallpaper) => {
+   182→    const frame = document.createElement("iframe")
+   183→    frame.style.display = "none"
+   184→    frame.src = downloadUrl(w)
+   185→    document.body.appendChild(frame)
+   186→    setTimeout(() => frame.remove(), 120000)
+   187→  }
+   188→
+   189→  /** 批量下载选中壁纸 */
+   190→  const batchDownload = () => {
+   191→    if (selected.length === 0) return
+   192→    selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 400))
+   193→    toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`)
+   194→    // 乐观移除：稍后刷新列表让服务端记录生效
+   195→    const ids = new Set(selected.map((w) => w.id))
+   196→    setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
+   197→    setSelected([])
+   198→    if (hideDownloaded) setTimeout(() => setReloadNonce((n) => n + 1), 8000)
+   199→  }
+   200→
+   201→  /** 单张下载：乐观移除（hideDownloaded 开启时） */
+   202→  const onDownloadOne = (w: ZhefengWallpaper) => {
+   203→    toast.success(`开始下载「${w.title}」，下载过的壁纸之后不再显示`)
+   204→    if (hideDownloaded) {
+   205→      setList((s) => ({ ...s, items: s.items.filter((i) => i.id !== w.id) }))
+   206→      setDownloadedCount((n) => n + 1)
+   207→    }
+   208→  }
+   209→
+   210→  /** 清空下载记录（被隐藏的壁纸重新显示） */
+   211→  const clearDownloads = async () => {
+   212→    try {
+   213→      const res = await fetch("/api/wallpapers/downloads", { method: "DELETE" })
+   214→      if (!res.ok) throw new Error()
+   215→      toast.success("下载记录已清空，所有壁纸恢复显示")
+   216→      setReloadNonce((n) => n + 1)
+   217→    } catch {
+   218→      toast.error("清空下载记录失败")
+   219→    }
+   220→  }
+   221→
+   222→  const isPhone = cat.wpType === 2
+   223→  const showSkeleton = list.page === 0 && (list.loading || !list.error)
+   224→
+   225→  return (
+   226→    <section aria-label="壁纸工坊">
+   227→      {/* 页头 */}
+   228→      <div className="mb-5 flex flex-col gap-1.5">
+   229→        <div className="flex flex-wrap items-center gap-2">
+   230→          <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
+   231→          <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
+   232→            v1.0.11
+   233→          </span>
+   234→          <button
+   235→            type="button"
+   236→            onClick={() => setTokenOpen(true)}
+   237→            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+   238→          >
+   239→            <KeyRound className="size-3.5" />
+   240→            令牌设置
+   241→          </button>
+   242→        </div>
+   243→        <p className="flex items-center gap-1 text-sm text-muted-foreground">
+   244→          <Sparkles className="size-3.5 shrink-0 text-primary" />
+   245→          壁纸实时获取自
+   246→          <a
+   247→            href="https://haowallpaper.com"
+   248→            target="_blank"
+   249→            rel="noreferrer"
+   250→            className="font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+   251→          >
+   252→            哲风壁纸
+   253→          </a>
+   254→          ，下载原图、发布小红书，下载过的自动隐藏
+   255→        </p>
+   256→      </div>
+   257→
+   258→      {/* 主体：左侧壁纸区 + 右侧已选面板（md 起常驻显示，避免窄断点看不到） */}
+   259→      <div className="flex flex-col gap-5 md:flex-row">
+   260→        <div className="min-w-0 flex-1">
+   261→          {/* 分类筛选 + 已下载过滤（容器内吸顶） */}
+   262→          <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 pb-2 pt-1 backdrop-blur-sm">
+   263→        <div className="flex items-center gap-2">
+   264→          <div className="custom-scrollbar flex flex-1 gap-2 overflow-x-auto pb-1" role="tablist" aria-label="壁纸分类">
+   265→            {ZHEFENG_CATEGORIES.map((c) => (
+   266→              <button
+   267→                key={c.key}
+   268→                type="button"
+   269→                role="tab"
+   270→                aria-selected={catKey === c.key}
+   271→                onClick={() => setCatKey(c.key)}
+   272→                className={cn(
+   273→                  "shrink-0 rounded-full border px-4 py-1.5 text-xs font-semibold transition-all",
+   274→                  catKey === c.key
+   275→                    ? "border-primary bg-primary text-primary-foreground shadow-md shadow-primary/20"
+   276→                    : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"
+   277→                )}
+   278→              >
+   279→                {c.name}
+   280→              </button>
+   281→            ))}
+   282→          </div>
+   283→
+   284→          {/* 已下载过滤开关 */}
+   285→          <div className="flex shrink-0 flex-col items-end gap-0.5 pb-1">
+   286→            <button
+   287→              type="button"
+   288→              role="switch"
+   289→              aria-checked={hideDownloaded}
+   290→              onClick={() => setHideDownloaded((v) => !v)}
+   291→              className={cn(
+   292→                "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold transition-colors",
+   293→                hideDownloaded
+   294→                  ? "border-primary/50 bg-primary/10 text-primary"
+   295→                  : "border-border text-muted-foreground hover:text-foreground"
+   296→              )}
+   297→            >
+   298→              <EyeOff className="size-3" />
+   299→              隐藏已下载{downloadedCount > 0 && `（${downloadedCount}）`}
+   300→            </button>
+   301→            {hideDownloaded && downloadedCount > 0 && (
+   302→              <button
+   303→                type="button"
+   304→                onClick={() => void clearDownloads()}
+   305→                className="inline-flex h-5.5 items-center gap-0.5 rounded-full px-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:text-destructive"
+   306→              >
+   307→                <Trash2 className="size-2.5" />
+   308→                清空记录
+   309→              </button>
+   310→            )}
+   311→          </div>
+   312→        </div>
+   313→      </div>
+   314→
+   315→      {/* 壁纸网格（无限滚动） */}
+   316→      <div
+   317→        ref={scrollRef}
+   318→        className="custom-scrollbar max-h-[calc(100vh-300px)] min-h-96 overflow-y-auto overscroll-contain pr-1"
+   319→      >
+   320→        {showSkeleton ? (
+   321→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   322→            {Array.from({ length: 8 }).map((_, i) => (
+   323→              <div
+   324→                key={i}
+   325→                className={cn(
+   326→                  "animate-pulse rounded-2xl bg-muted",
+   327→                  isPhone ? "aspect-[9/16]" : "aspect-[16/10]"
+   328→                )}
+   329→              />
+   330→            ))}
+   331→          </div>
+   332→        ) : list.error && list.items.length === 0 ? (
+   333→          <div className="flex min-h-64 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed p-8 text-center">
+   334→            <p className="text-sm font-semibold text-destructive">{list.error}</p>
+   335→            <button
+   336→              type="button"
+   337→              onClick={() => setReloadNonce((n) => n + 1)}
+   338→              className="inline-flex h-9 items-center gap-1.5 rounded-full border px-4 text-xs font-semibold transition-colors hover:bg-muted"
+   339→            >
+   340→              <RefreshCw className="size-3.5" />
+   341→              重新抓取
+   342→            </button>
+   343→          </div>
+   344→        ) : list.items.length === 0 ? (
+   345→          <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-center">
+   346→            <p className="text-sm text-muted-foreground">
+   347→              {hideDownloaded && downloadedCount > 0 ? "这一页的壁纸都下载过了" : "这个分类暂时没有壁纸"}
+   348→            </p>
+   349→            {hideDownloaded && downloadedCount > 0 && (
+   350→              <button
+   351→                type="button"
+   352→                onClick={() => setHideDownloaded(false)}
+   353→                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors hover:bg-muted"
+   354→              >
+   355→                <EyeOff className="size-3.5" />
+   356→                显示已下载的壁纸
+   357→              </button>
+   358→            )}
+   359→          </div>
+   360→        ) : (
+   361→          <div className={cn("grid gap-3", isPhone ? "grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6" : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4")}>
+   362→            {list.items.map((w) => {
+   363→              const order = selected.findIndex((p) => p.id === w.id)
+   364→              const isSelected = order >= 0
+   365→              return (
+   366→                <motion.button
+   367→                  key={w.id}
+   368→                  type="button"
+   369→                  layout
+   370→                  initial={{ opacity: 0, y: 12 }}
+   371→                  animate={{ opacity: 1, y: 0 }}
+   372→                  transition={{ duration: 0.25 }}
+   373→                  onClick={() => toggle(w)}
+   374→                  aria-pressed={isSelected}
+   375→                  aria-label={`壁纸：${w.title}`}
+   376→                  className={cn(
+   377→                    "group relative overflow-hidden rounded-2xl border-2 text-left transition-all",
+   378→                    isPhone ? "aspect-[9/16]" : "aspect-[16/10]",
+   379→                    isSelected
+   380→                      ? "border-primary shadow-lg shadow-primary/25"
+   381→                      : "border-transparent shadow-sm hover:-translate-y-1 hover:shadow-lg"
+   382→                  )}
+   383→                >
+   384→                  {/* eslint-disable-next-line @next/next/no-img-element */}
+   385→                  <img
+   386→                    src={proxyImageUrl(w.thumb)}
+   387→                    alt={`壁纸 ${w.title}`}
+   388→                    loading="lazy"
+   389→                    decoding="async"
+   390→                    className="size-full bg-muted object-cover transition-transform duration-300 group-hover:scale-105"
+   391→                  />
+   392→
+   393→                  {/* 分辨率徽标 */}
+   394→                  <span className="absolute left-2 top-2 rounded-full bg-black/45 px-1.5 py-0.5 text-[10px] font-bold text-white backdrop-blur-sm">
+   395→                    {w.resolution}
+   396→                  </span>
+   397→
+   398→                  {/* 底部信息 */}
+   399→                  <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 via-black/25 to-transparent px-2.5 pb-2 pt-8">
+   400→                    <span className="block truncate text-xs font-bold text-white">{w.title}</span>
+   401→                    {w.tags.length > 0 && (
+   402→                      <span className="mt-0.5 block truncate text-[10px] text-white/75">
+   403→                        {w.tags.slice(0, 3).join(" · ")}
+   404→                      </span>
+   405→                    )}
+   406→                  </span>
+   407→
+   408→                  {/* 选择角标 */}
+   409→                  <span
+   410→                    className={cn(
+   411→                      "absolute right-2 top-2 flex size-6 items-center justify-center rounded-full text-[11px] font-bold shadow transition-all",
+   412→                      isSelected
+   413→                        ? "scale-100 bg-primary text-primary-foreground"
+   414→                        : "scale-90 bg-black/35 text-white opacity-0 backdrop-blur-sm group-hover:scale-100 group-hover:opacity-100"
+   415→                    )}
+   416→                  >
+   417→                    {isSelected ? order + 1 : <Check className="size-3.5" />}
+   418→                  </span>
+   419→
+   420→                  {/* 悬浮快捷操作 */}
+   421→                  <span className="absolute bottom-2 right-2 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+   422→                    <span
+   423→                      role="button"
+   424→                      tabIndex={-1}
+   425→                      aria-label={`预览壁纸 ${w.title}`}
+   426→                      onClick={(e) => {
+   427→                        e.stopPropagation()
+   428→                        setPreviewLoading(true)
+   429→                        setPreview(w)
+   430→                      }}
+   431→                      className="flex size-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform hover:scale-110"
+   432→                    >
+   433→                      <Expand className="size-3.5" />
+   434→                    </span>
+   435→                    <a
+   436→                      role="button"
+   437→                      tabIndex={-1}
+   438→                      aria-label={`下载原图 ${w.title}`}
+   439→                      href={downloadUrl(w)}
+   440→                      onClick={(e) => {
+   441→                        e.stopPropagation()
+   442→                        onDownloadOne(w)
+   443→                      }}
+   444→                      className="flex size-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform hover:scale-110"
+   445→                    >
+   446→                      <Download className="size-3.5" />
+   447→                    </a>
+   448→                  </span>
+   449→                </motion.button>
+   450→              )
+   451→            })}
+   452→          </div>
+   453→        )}
+   454→
+   455→        {/* 加载更多 / 错误重试 / 到底提示 */}
+   456→        <div ref={sentinelRef} className="mt-4 flex min-h-12 items-center justify-center pb-2">
+   457→          {list.loading && (
+   458→            <span className="flex items-center gap-2 text-xs text-muted-foreground">
+   459→              <span className="size-4 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+   460→              正在从哲风壁纸抓取…
+   461→            </span>
+   462→          )}
+   463→          {!list.loading && list.error && list.items.length > 0 && (
+   464→            <button
+   465→              type="button"
+   466→              onClick={() => void loadMore()}
+   467→              className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-destructive transition-colors hover:bg-muted"
+   468→            >
+   469→              <RefreshCw className="size-3" />
+   470→              加载失败，点击重试
+   471→            </button>
+   472→          )}
+   473→          {!list.loading && !list.error && !list.hasMore && list.items.length > 0 && (
+   474→            <span className="text-xs text-muted-foreground">已经到底啦，换个分类看看吧</span>
+   475→          )}
+   476→        </div>
+   477→      </div>
+   478→        </div>
+   479→
+   480→      {/* 右侧面板：已选壁纸清单 + 发布 / 批量下载 */}
+   481→      <aside className="hidden md:block md:w-[280px] md:shrink-0 lg:w-[310px]">
+   482→        <div className="md:sticky md:top-20">
+   483→          <SelectionPanel
+   484→            items={selected}
+   485→            isPhone={isPhone}
+   486→            onRemove={toggle}
+   487→            onPublish={publishSelected}
+   488→            onBatchDownload={batchDownload}
+   489→            onClear={() => setSelected([])}
+   490→          />
+   491→        </div>
+   492→      </aside>
+   493→    </div>
+   494→
+   495→      {/* 悬浮操作栏：仅移动端（md 起由右侧面板接管） */}
+   496→      <AnimatePresence>
+   497→        {selected.length > 0 && (
+   498→          <motion.div
+   499→            initial={{ y: 80, opacity: 0 }}
+   500→            animate={{ y: 0, opacity: 1 }}
+   501→            exit={{ y: 80, opacity: 0 }}
+   502→            transition={{ type: "spring", stiffness: 320, damping: 28 }}
+   503→            className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center gap-2 rounded-2xl border bg-background/95 p-2 pl-4 shadow-2xl backdrop-blur-md md:hidden sm:gap-3 sm:pl-5"
+   504→            role="toolbar"
+   505→            aria-label="壁纸批量操作"
+   506→          >
+   507→            <p className="shrink-0 text-sm font-semibold">
+   508→              已选 <span className="text-primary">{selected.length}</span> 张
+   509→            </p>
+   510→            <button
+   511→              type="button"
+   512→              onClick={publishSelected}
+   513→              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95 sm:px-5"
+   514→            >
+   515→              <Send className="size-3.5" />
+   516→              发布到小红书
+   517→            </button>
+   518→            <button
+   519→              type="button"
+   520→              onClick={batchDownload}
+   521→              className="inline-flex h-9 items-center gap-1.5 rounded-full border-2 border-primary/60 px-4 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95 sm:px-5"
+   522→            >
+   523→              <Download className="size-3.5" />
+   524→              批量下载
+   525→            </button>
+   526→            <button
+   527→              type="button"
+   528→              aria-label="清空选择"
+   529→              onClick={() => setSelected([])}
+   530→              className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+   531→            >
+   532→              <X className="size-4" />
+   533→            </button>
+   534→          </motion.div>
+   535→        )}
+   536→      </AnimatePresence>
+   537→
+   538→      {/* 令牌设置弹窗 */}
+   539→      <TokenSettingsDialog open={tokenOpen} onOpenChange={setTokenOpen} />
+   540→
+   541→      {/* 壁纸预览弹窗 */}
+   542→      <WallpaperPreviewDialog
+   543→        wallpaper={preview}
+   544→        imgLoading={previewLoading}
+   545→        onImgLoaded={() => setPreviewLoading(false)}
+   546→        onClose={() => setPreview(null)}
+   547→        onToggle={(w) => {
+   548→          toggle(w)
+   549→          toast.success(selected.some((p) => p.id === w.id) ? "已取消选择" : "已加入选择")
+   550→        }}
+   551→        onPublish={(w) => {
+   552→          goPublish([w.src])
+   553→          setPreview(null)
+   554→          toast.success("已暂存壁纸，去小红书创作者中心发布吧")
+   555→        }}
+   556→        onDownloaded={(w) => {
+   557→          onDownloadOne(w)
+   558→          setPreview(null)
+   559→        }}
+   560→      />
+   561→    </section>
+   562→  )
+   563→}
+   564→
+   565→/** 壁纸大图预览：原图查看 / 下载 / 选择 / 发布 */
+   566→function WallpaperPreviewDialog({
+   567→  wallpaper,
+   568→  imgLoading,
+   569→  onImgLoaded,
+   570→  onClose,
+   571→  onToggle,
+   572→  onPublish,
+   573→  onDownloaded,
+   574→}: {
+   575→  wallpaper: ZhefengWallpaper | null
+   576→  imgLoading: boolean
+   577→  onImgLoaded: () => void
+   578→  onClose: () => void
+   579→  onToggle: (w: ZhefengWallpaper) => void
+   580→  onPublish: (w: ZhefengWallpaper) => void
+   581→  onDownloaded: (w: ZhefengWallpaper) => void
+   582→}) {
+   583→  return (
+   584→    <Dialog open={!!wallpaper} onOpenChange={(open) => !open && onClose()}>
+   585→      <DialogContent className="max-w-2xl gap-0 overflow-hidden p-0 sm:max-w-2xl">
+   586→        <DialogHeader className="sr-only">
+   587→          <DialogTitle>壁纸预览</DialogTitle>
+   588→        </DialogHeader>
+   589→        {wallpaper && (
+   590→          <>
+   591→            <div className="relative flex max-h-[60vh] items-center justify-center bg-neutral-950">
+   592→              {imgLoading && (
+   593→                <span className="absolute z-10 flex size-8 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+   594→              )}
+   595→              {/* eslint-disable-next-line @next/next/no-img-element */}
+   596→              <img
+   597→                src={proxyImageUrl(wallpaper.src)}
+   598→                alt={`壁纸 ${wallpaper.title}`}
+   599→                onLoad={onImgLoaded}
+   600→                onError={onImgLoaded}
+   601→                className={cn(
+   602→                  "max-h-[60vh] w-auto max-w-full object-contain transition-opacity",
+   603→                  imgLoading ? "opacity-0" : "opacity-100"
+   604→                )}
+   605→              />
+   606→            </div>
+   607→            <div className="p-4">
+   608→              <div className="flex items-center gap-2">
+   609→                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
+   610→                  {wallpaper.resolution}
+   611→                </span>
+   612→                <h3 className="truncate text-base font-bold">{wallpaper.title}</h3>
+   613→              </div>
+   614→              {wallpaper.tags.length > 0 && (
+   615→                <div className="custom-scrollbar mt-2 flex gap-1.5 overflow-x-auto pb-0.5">
+   616→                  {wallpaper.tags.map((t) => (
+   617→                    <span
+   618→                      key={t}
+   619→                      className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
+   620→                    >
+   621→                      #{t}
+   622→                    </span>
+   623→                  ))}
+   624→                </div>
+   625→              )}
+   626→              <div className="mt-4 grid grid-cols-3 gap-2">
+   627→                <a
+   628→                  href={downloadUrl(wallpaper)}
+   629→                  onClick={() => onDownloaded(wallpaper)}
+   630→                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-primary text-xs font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-95"
+   631→                >
+   632→                  <Download className="size-3.5" />
+   633→                  下载原图
+   634→                </a>
+   635→                <button
+   636→                  type="button"
+   637→                  onClick={() => onToggle(wallpaper)}
+   638→                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border-2 border-primary/40 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95"
+   639→                >
+   640→                  <Check className="size-3.5" />
+   641→                  加入选择
+   642→                </button>
+   643→                <button
+   644→                  type="button"
+   645→                  onClick={() => onPublish(wallpaper)}
+   646→                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border-2 border-primary/60 text-xs font-bold text-primary transition-all hover:bg-accent active:scale-95"
+   647→                >
+   648→                  <Send className="size-3.5" />
+   649→                  去发布
+   650→                </button>
+   651→              </div>
+   652→              <p className="mt-2.5 text-center text-[10px] text-muted-foreground">
+   653→                已配置令牌时下载与官网分辨率、文件大小完全一致；下载过的壁纸之后不再显示
+   654→              </p>
+   655→            </div>
+   656→          </>
+   657→        )}
+   658→      </DialogContent>
+   659→    </Dialog>
+   660→  )
+   661→}
+   662→
