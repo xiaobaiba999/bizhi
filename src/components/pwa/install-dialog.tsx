@@ -239,12 +239,12 @@ export function AppInstallDialog() {
                 壁纸自动存入「下载」文件夹；卸载走系统应用管理，勾选删除数据即可彻底清理。
               </p>
               <a
-                href="/desktop/壁纸工坊-Setup-1.1.0.exe"
+                href="/desktop/壁纸工坊-Setup-1.1.1.exe"
                 download
                 className="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
               >
                 <Download className="size-4" />
-                下载安装包（v1.1.0 · 约 167MB）
+                下载安装包（v1.1.1 · 约 168MB）
               </a>
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/80">
                 双击运行 → 下一步 → 安装 → 完成。未签名应用首次运行时 SmartScreen

@@ -23,6 +23,23 @@ export const ZF_WX_CALLBACK = "https://haowallpaper.com/link/app/appUser/wxLogin
 /** 扫码状态轮询接口 */
 export const ZF_STATE_LOGIN_URL = `${API_BASE}/link/app/appUser/stateLogin`
 
+/**
+ * 扫码会话登记（进程内存）：记录创建时间，用于本地判定过期，
+ * 避免「源站迟迟不报过期 → 前端无限等待」的问题。
+ */
+const sessions = new Map<string, number>()
+
+/** 二维码会话本地过期时间（毫秒）：超过即直接判过期，不再依赖源站 */
+export const QR_SESSION_TTL_MS = 3 * 60 * 1000
+
+/** 登录相关端点连通性（用于提前给出明确错误，避免无意义的无限等待） */
+export interface LoginEndpointStatus {
+  /** 微信开放平台（二维码 iframe）是否可达 */
+  wx: boolean
+  /** 哲风壁纸登录服务是否可达 */
+  zf: boolean
+}
+
 /** 令牌获取原图直链接口 */
 export function zfCompleteUrl(wtId: string): string {
   return `${API_BASE}/link/common/file/getCompleteUrl/${encodeURIComponent(wtId)}`
@@ -40,9 +57,18 @@ export function zfUpstreamHeaders(extra?: Record<string, string>): Record<string
   }
 }
 
-/** 生成随机 state（与官网一致的 uuid 形态） */
+/** 生成随机 state（与官网一致的 uuid 形态），同时登记会话创建时间 */
 export function newState(): string {
-  return crypto.randomUUID()
+  const state = crypto.randomUUID()
+  sessions.set(state, Date.now())
+  // 顺手清理超过 1 小时的旧会话，防止内存增长
+  if (sessions.size > 64) {
+    const now = Date.now()
+    for (const [k, t] of sessions) {
+      if (now - t > 3_600_000) sessions.delete(k)
+    }
+  }
+  return state
 }
 
 /** 构造微信开放平台扫码二维码 iframe 地址（与官网 WxLogin 参数一致） */
@@ -78,8 +104,38 @@ function digToken(data: unknown, depth = 0): string | null {
   return digToken(obj.data, depth + 1)
 }
 
+/** 会话是否已超过本地 TTL（超时直接判过期，不再无限等待源站） */
+function sessionTimedOut(state: string): boolean {
+  const t = sessions.get(state)
+  return typeof t === "number" && Date.now() - t > QR_SESSION_TTL_MS
+}
+
+/**
+ * 探测登录相关端点连通性。
+ * 只要能拿到任意 HTTP 响应（含 4xx/5xx）即视为网络可达；
+ * 仅在 DNS / TCP / TLS 全部失败（fetch 抛异常）时判定不可达。
+ */
+export async function probeLoginEndpoints(): Promise<LoginEndpointStatus> {
+  const ping = async (url: string): Promise<boolean> => {
+    try {
+      await fetch(url, {
+        headers: zfUpstreamHeaders(),
+        redirect: "manual",
+        signal: AbortSignal.timeout(6000),
+        cache: "no-store",
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+  const [wx, zf] = await Promise.all([ping("https://open.weixin.qq.com/"), ping(`${API_BASE}/`)])
+  return { wx, zf }
+}
+
 /**
  * 服务端代为轮询扫码状态。
+ * - 会话超过本地 TTL → 直接判过期（避免前端无限等待）
  * - status 200 + data 含 token → ok
  * - status 305 且 msg 为空 → pending（等待扫码）
  * - status 305 且 msg 非空 → expired（二维码过期/失效）
@@ -88,6 +144,9 @@ function digToken(data: unknown, depth = 0): string | null {
 export async function pollStateLogin(state: string): Promise<ZfPollResult> {
   if (!/^[0-9A-Za-z_-]{1,128}$/.test(state)) {
     return { status: "error", msg: "state 参数不合法" }
+  }
+  if (sessionTimedOut(state)) {
+    return { status: "expired", msg: "二维码已超时，请刷新后重新扫码" }
   }
   try {
     const res = await fetch(`${ZF_STATE_LOGIN_URL}?state=${encodeURIComponent(state)}`, {

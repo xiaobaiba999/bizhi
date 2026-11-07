@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
-import { buildWxQrUrl, newState, pollStateLogin } from "@/lib/zf-login"
+import { buildWxQrUrl, newState, pollStateLogin, probeLoginEndpoints } from "@/lib/zf-login"
 
 /** 令牌脱敏展示：保留前 8 后 4 位 */
 function maskToken(token: string) {
@@ -10,11 +10,20 @@ function maskToken(token: string) {
 
 /**
  * POST /api/zf-login —— 发起扫码登录
- * 返回 { state, qrUrl }：qrUrl 为微信开放平台二维码 iframe 地址（与官网登录参数一致）。
+ * 返回 { state, qrUrl, wxReachable, zfReachable }：
+ * - qrUrl 为微信开放平台二维码 iframe 地址（与官网登录参数一致）
+ * - wx/zfReachable 为服务端连通性预检结果 —— 不可达时前端立即给出明确错误
+ *   与「手动粘贴」兜底入口，而不是停留在「等待扫码」中无限等待。
  */
 export async function POST() {
   const state = newState()
-  return NextResponse.json({ state, qrUrl: buildWxQrUrl(state) })
+  const reach = await probeLoginEndpoints()
+  return NextResponse.json({
+    state,
+    qrUrl: buildWxQrUrl(state),
+    wxReachable: reach.wx,
+    zfReachable: reach.zf,
+  })
 }
 
 /**

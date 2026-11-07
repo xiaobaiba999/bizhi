@@ -1,6 +1,6 @@
 "use client"
 
-import { Download, ImageIcon, MousePointerClick, X } from "lucide-react"
+import { Download, FolderOpen, ImageIcon, MousePointerClick, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
 
@@ -8,6 +8,10 @@ interface SelectionPanelProps {
   items: ZhefengWallpaper[]
   /** 当前分类是否为竖版手机壁纸（决定缩略图比例） */
   isPhone: boolean
+  /** 桌面版下载保存目录（网页版为 null，不显示） */
+  downloadDir: string | null
+  /** 点击「保存位置」打开磁盘文件夹 */
+  onOpenDownloadDir: () => void
   onRemove: (w: ZhefengWallpaper) => void
   onBatchDownload: () => void
   onClear: () => void
@@ -20,6 +24,8 @@ interface SelectionPanelProps {
 export function SelectionPanel({
   items,
   isPhone,
+  downloadDir,
+  onOpenDownloadDir,
   onRemove,
   onBatchDownload,
   onClear,
@@ -112,6 +118,19 @@ export function SelectionPanel({
               <Download className="size-4" />
               批量下载原图（{items.length} 张）
             </button>
+            {/* 桌面版：展示图片保存位置，点击调起磁盘文件夹 */}
+            {downloadDir && (
+              <button
+                type="button"
+                onClick={onOpenDownloadDir}
+                title={downloadDir}
+                aria-label={`打开壁纸保存文件夹：${downloadDir}`}
+                className="flex w-full items-center gap-1.5 rounded-full px-1 py-0.5 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <FolderOpen className="size-3 shrink-0" />
+                <span className="min-w-0 flex-1 truncate text-left">保存位置：{downloadDir}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onClear}

@@ -8,6 +8,7 @@ import {
   Download,
   EyeOff,
   Expand,
+  FolderOpen,
   KeyRound,
   RefreshCw,
   Sparkles,
@@ -16,6 +17,13 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ZHEFENG_CATEGORIES, proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
+import {
+  fetchDownloadDir,
+  getDesktopApp,
+  onDesktopDownloadDone,
+  openDownloadFolder,
+  revealDownloadedFile,
+} from "@/lib/desktop"
 import { TokenSettingsDialog } from "@/components/workshop/token-settings"
 import { SelectionPanel } from "@/components/workshop/selection-panel"
 import {
@@ -61,6 +69,62 @@ export function WorkshopTab() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const seqRef = useRef(0)
+  /** 桌面版下载保存目录（网页版为 null） */
+  const [dlDir, setDlDir] = useState<string | null>(null)
+  /** 下载完成提示防抖合并（批量下载 N 张 → 合并为一条「已保存 N 张」） */
+  const dlToastRef = useRef<{ count: number; lastAt: number; timer: ReturnType<typeof setTimeout> | null }>({
+    count: 0,
+    lastAt: 0,
+    timer: null,
+  })
+
+  // 桌面版：拉取下载目录（用于展示「图片存在的位置」）
+  useEffect(() => {
+    let alive = true
+    void fetchDownloadDir().then((dir) => {
+      if (alive && dir) setDlDir(dir)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 桌面版：下载落盘完成后提示保存位置，并可一键调起磁盘文件管理器
+  useEffect(() => {
+    return onDesktopDownloadDone(({ path, filename }) => {
+      const agg = dlToastRef.current
+      const now = Date.now()
+      // 距上次完成超过 10 秒 → 视为新一批下载，重新计数
+      if (now - agg.lastAt > 10_000) agg.count = 0
+      agg.lastAt = now
+      agg.count += 1
+      const total = agg.count
+      if (agg.timer) clearTimeout(agg.timer)
+      agg.timer = setTimeout(() => {
+        agg.timer = null
+        agg.count = 0
+        const dir =
+          path.length > filename.length && path.endsWith(filename)
+            ? path.slice(0, path.length - filename.length).replace(/[\\/]+$/, "")
+            : path
+        toast.success(total > 1 ? `已保存 ${total} 张壁纸到磁盘` : `壁纸已保存`, {
+          id: "wf-download-done",
+          description: `保存位置：${total > 1 ? dir : path}`,
+          action: {
+            label: "打开文件夹",
+            onClick: () => {
+              void (total > 1 ? openDownloadFolder() : revealDownloadedFile(path)).then((res) => {
+                if (!res.ok && res.error && res.error !== "not-desktop") {
+                  toast.error("打开文件夹失败", { description: res.error })
+                }
+              })
+            },
+          },
+          duration: 8000,
+        })
+      }, 700)
+    })
+  }, [])
 
   const cat = ZHEFENG_CATEGORIES.find((c) => c.key === catKey) ?? ZHEFENG_CATEGORIES[0]
 
@@ -175,11 +239,29 @@ export function WorkshopTab() {
     setTimeout(() => frame.remove(), 120000)
   }
 
+  /** 打开下载目录（桌面版调起磁盘文件管理器；网页版说明浏览器下载位置） */
+  const handleOpenDownloads = async () => {
+    if (getDesktopApp()) {
+      const r = await openDownloadFolder()
+      if (!r.ok) toast.error("打开下载文件夹失败", { description: r.error })
+      else toast.success("已打开下载文件夹", { description: dlDir ?? undefined, duration: 5000 })
+      return
+    }
+    toast.info("网页版下载由浏览器保存", {
+      description:
+        "默认在系统「下载」文件夹。安装桌面版后会自动整理到「下载\\壁纸工坊」，支持一键打开定位。",
+      duration: 6000,
+    })
+  }
+
   /** 批量下载选中壁纸 */
   const batchDownload = () => {
     if (selected.length === 0) return
     selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 400))
-    toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`)
+    toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
+      description: dlDir ? `保存位置：${dlDir}，完成后可点「打开文件夹」` : undefined,
+      duration: 6000,
+    })
     // 乐观移除：稍后刷新列表让服务端记录生效
     const ids = new Set(selected.map((w) => w.id))
     setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
@@ -218,15 +300,26 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.1.0
+            v1.1.1
           </span>
           <button
             type="button"
             onClick={() => setTokenOpen(true)}
-            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+            className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
           >
             <KeyRound className="size-3.5" />
             令牌设置
+          </button>
+          {/* 下载位置：桌面版直接调起磁盘文件夹；网页版说明浏览器默认下载目录 */}
+          <button
+            type="button"
+            onClick={() => void handleOpenDownloads()}
+            title={dlDir ?? "查看壁纸下载保存位置"}
+            aria-label={`打开壁纸下载文件夹${dlDir ? `：${dlDir}` : ""}`}
+            className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+          >
+            <FolderOpen className="size-3.5" />
+            下载位置
           </button>
         </div>
         <p className="flex items-center gap-1 text-sm text-muted-foreground">
@@ -472,6 +565,8 @@ export function WorkshopTab() {
           <SelectionPanel
             items={selected}
             isPhone={isPhone}
+            downloadDir={dlDir}
+            onOpenDownloadDir={() => void handleOpenDownloads()}
             onRemove={toggle}
             onBatchDownload={batchDownload}
             onClear={() => setSelected([])}

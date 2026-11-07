@@ -12,7 +12,7 @@
  *    nsis.deleteAppDataOnUninstall 在卸载时一并删除 → 干净卸载、无残留
  */
 
-const { app, BrowserWindow, Menu, shell, session, dialog, Notification } = require("electron");
+const { app, BrowserWindow, Menu, shell, session, dialog, Notification, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -47,8 +47,9 @@ let quitting = false;
 
 /* ---------------- 路径与数据库 ---------------- */
 
-/** Next standalone 服务器目录 */
+/** Next standalone 服务器目录（WF_SERVER_DIR 可覆盖，便于开发/冒烟测试直接指向打包布局） */
 function serverDir() {
+  if (process.env.WF_SERVER_DIR) return process.env.WF_SERVER_DIR;
   if (IS_DEV) {
     return path.join(__dirname, "..", ".next-desktop", "standalone");
   }
@@ -193,6 +194,43 @@ function downloadDir() {
   return path.join(base, "壁纸工坊");
 }
 
+/** 网页 → 主进程 IPC：获取/打开下载目录、定位已下载文件（调起磁盘文件管理器） */
+function setupIpc() {
+  ipcMain.handle("wf:get-download-dir", () => {
+    try {
+      return downloadDir();
+    } catch (e) {
+      return "";
+    }
+  });
+
+  ipcMain.handle("wf:open-download-dir", () => {
+    try {
+      const dir = downloadDir();
+      fs.mkdirSync(dir, { recursive: true });
+      const err = shell.openPath(dir);
+      if (err) console.error("[desktop] 打开下载目录失败:", err);
+      return err || "";
+    } catch (e) {
+      return String((e && e.message) || e);
+    }
+  });
+
+  ipcMain.handle("wf:reveal-file", (_event, filePath) => {
+    try {
+      // 仅允许定位下载目录内的文件，避免网页探测任意磁盘路径
+      const dir = path.resolve(downloadDir());
+      const target = path.resolve(String(filePath || ""));
+      if (target !== dir && !target.startsWith(dir + path.sep)) return "invalid path";
+      if (!fs.existsSync(target)) return "not found";
+      shell.showItemInFolder(target);
+      return "";
+    } catch (e) {
+      return String((e && e.message) || e);
+    }
+  });
+}
+
 /** 重名文件自动追加序号：name (1).ext */
 function uniquePath(dir, filename) {
   let target = path.join(dir, filename);
@@ -219,9 +257,23 @@ function setupDownloads() {
       item.once("done", (_e, state) => {
         console.log(`[desktop] 下载${state === "completed" ? "完成" : "中断"}: ${target}`);
         if (state === "completed") {
+          // 推送给网页：弹「已保存 + 打开文件夹」提示（网页层做防抖合并）
+          try {
+            if (win && !win.isDestroyed()) {
+              win.webContents.send("wf:download-done", {
+                path: target,
+                filename: path.basename(target),
+              });
+            }
+          } catch {
+            /* ignore */
+          }
           try {
             if (Notification.isSupported()) {
-              new Notification({ title: "壁纸已保存", body: path.basename(target) }).show();
+              new Notification({
+                title: "壁纸已保存",
+                body: `${path.basename(target)}\n保存位置：${downloadDir()}`,
+              }).show();
             }
           } catch {
             /* ignore */
@@ -309,6 +361,7 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
     setupDownloads();
+    setupIpc();
 
     try {
       ensureDatabase();
