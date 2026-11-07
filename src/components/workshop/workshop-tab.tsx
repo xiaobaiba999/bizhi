@@ -337,9 +337,9 @@ export function WorkshopTab() {
         </p>
       </div>
 
-      {/* 主体：左侧壁纸区 + 右侧已选面板（md 起常驻显示，避免窄断点看不到） */}
-      <div className="flex flex-col gap-5 md:flex-row">
-        <div className="min-w-0 flex-1">
+      {/* 主体：左侧壁纸区 + 右侧已选面板（≥480px 即常驻右侧，窄预览窗也能看到；手机端由底部悬浮栏接管） */}
+      <div className="flex flex-col gap-5 min-[480px]:flex-row">
+        <div className="@container min-w-0 flex-1">
           {/* 分类筛选 + 已下载过滤（容器内吸顶） */}
           <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 pb-2 pt-1 backdrop-blur-sm">
         <div className="flex items-center gap-2">
@@ -400,7 +400,7 @@ export function WorkshopTab() {
         className="custom-scrollbar max-h-[calc(100vh-300px)] min-h-96 overflow-y-auto overscroll-contain pr-1"
       >
         {showSkeleton ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 @sm:grid-cols-3 @2xl:grid-cols-4">
             {Array.from({ length: 8 }).map((_, i) => (
               <div
                 key={i}
@@ -440,7 +440,7 @@ export function WorkshopTab() {
             )}
           </div>
         ) : (
-          <div className={cn("grid gap-3", isPhone ? "grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6" : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4")}>
+          <div className={cn("grid gap-3", isPhone ? "grid-cols-2 @sm:grid-cols-3 @xl:grid-cols-4 @3xl:grid-cols-5 @5xl:grid-cols-6" : "grid-cols-1 @sm:grid-cols-2 @2xl:grid-cols-3 @4xl:grid-cols-4")}>
             {list.items.map((w) => {
               const order = selected.findIndex((p) => p.id === w.id)
               const isSelected = order >= 0
@@ -559,9 +559,9 @@ export function WorkshopTab() {
       </div>
         </div>
 
-      {/* 右侧面板：已选壁纸清单 + 批量下载 */}
-      <aside className="hidden md:block md:w-[280px] md:shrink-0 lg:w-[310px]">
-        <div className="md:sticky md:top-20">
+      {/* 右侧面板：已选壁纸清单 + 批量下载（≥480px 常驻，手机端隐藏） */}
+      <aside className="hidden w-[200px] shrink-0 min-[480px]:block sm:w-[230px] md:w-[280px] lg:w-[310px]">
+        <div className="min-[480px]:sticky min-[480px]:top-[4.25rem] md:top-20">
           <SelectionPanel
             items={selected}
             isPhone={isPhone}
@@ -575,7 +575,7 @@ export function WorkshopTab() {
       </aside>
     </div>
 
-      {/* 悬浮操作栏：仅移动端（md 起由右侧面板接管） */}
+      {/* 悬浮操作栏：仅手机端（≥480px 起由右侧面板接管） */}
       <AnimatePresence>
         {selected.length > 0 && (
           <motion.div
@@ -583,7 +583,7 @@ export function WorkshopTab() {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 80, opacity: 0 }}
             transition={{ type: "spring", stiffness: 320, damping: 28 }}
-            className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center gap-2 rounded-2xl border bg-background/95 p-2 pl-4 shadow-2xl backdrop-blur-md md:hidden sm:gap-3 sm:pl-5"
+            className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-fit max-w-[calc(100vw-2rem)] items-center gap-2 rounded-2xl border bg-background/95 p-2 pl-4 shadow-2xl backdrop-blur-md min-[480px]:hidden sm:gap-3 sm:pl-5"
             role="toolbar"
             aria-label="壁纸批量操作"
           >
