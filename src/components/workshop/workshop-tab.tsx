@@ -85,18 +85,31 @@ function supportsDirectoryPicker(): boolean {
   )
 }
 
-/** 弹出浏览器目录选择器（需用户手势触发），取消 / 被拦截时返回 null */
-async function pickWebDirectory(): Promise<FsDirHandle | null> {
-  if (!supportsDirectoryPicker()) return null
+/** 目录选择结果：成功 / 用户取消 / 被环境拦截（iframe 嵌入、无用户激活等） */
+type PickDirResult =
+  | { kind: "ok"; dir: FsDirHandle }
+  | { kind: "canceled" }
+  | { kind: "blocked"; reason: string }
+
+/** 弹出浏览器目录选择器（需用户手势触发）；区分「取消」与「被拦截」 */
+async function pickWebDirectory(): Promise<PickDirResult> {
+  if (!supportsDirectoryPicker()) return { kind: "canceled" }
   try {
     const picker = (
       window as unknown as {
         showDirectoryPicker: (options?: { mode?: "read" | "readwrite" }) => Promise<FsDirHandle>
       }
     ).showDirectoryPicker
-    return await picker({ mode: "readwrite" })
-  } catch {
-    return null
+    const dir = await picker({ mode: "readwrite" })
+    return { kind: "ok", dir }
+  } catch (e) {
+    // AbortError = 用户在系统对话框里点了取消，静默返回
+    if (e instanceof DOMException && e.name === "AbortError") return { kind: "canceled" }
+    // 其余（SecurityError / 嵌入 iframe 拦截 / 需要用户激活…）都是「没弹出来」→ 需要给用户明确指引
+    return {
+      kind: "blocked",
+      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    }
   }
 }
 
@@ -170,6 +183,9 @@ export function WorkshopTab() {
   /** 下载过的图片不再显示（默认开启，可临时关闭查看） */
   const [hideDownloaded, setHideDownloaded] = useState(true)
   const [downloadedCount, setDownloadedCount] = useState(0)
+  /** 浏览器能力（挂载后判定，避免 SSR / hydration 不一致）：目录选择器支持 + 是否嵌入 iframe */
+  const [pickerSupported, setPickerSupported] = useState(false)
+  const [embeddedView, setEmbeddedView] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -191,6 +207,16 @@ export function WorkshopTab() {
     lastAt: 0,
     timer: null,
   })
+
+  // 挂载后判定浏览器能力（SSR 阶段恒为默认值，杜绝 hydration 不一致）
+  useEffect(() => {
+    setPickerSupported(supportsDirectoryPicker())
+    try {
+      setEmbeddedView(window.self !== window.top)
+    } catch {
+      setEmbeddedView(true) // 跨域受限时同样按嵌入处理
+    }
+  }, [])
 
   // 桌面版：拉取下载目录（用于展示「图片存在的位置」）
   useEffect(() => {
@@ -407,7 +433,7 @@ export function WorkshopTab() {
     })
   }
 
-  /** 更改 / 选择保存位置（桌面版：系统对话框 + 持久化；网页版：File System Access） */
+  /** 更改 / 选择保存位置（桌面版：系统磁盘文件夹选择器 + 持久化；网页版：File System Access） */
   const handleChooseDir = async () => {
     if (getDesktopApp()) {
       const r = await chooseDesktopDownloadDir()
@@ -426,11 +452,28 @@ export function WorkshopTab() {
       })
       return
     }
-    const dir = await pickWebDirectory()
-    if (!dir) return // 用户取消 / 浏览器拦截
-    webDirRef.current = dir
-    setWebDirName(dir.name)
-    toast.success(`已选择保存位置：${dir.name}`, {
+    const r = await pickWebDirectory()
+    if (r.kind === "canceled") return // 用户在系统对话框里取消，不打扰
+    if (r.kind === "blocked") {
+      // 嵌入预览面板（iframe）里浏览器会拦截目录选择器 —— 给出明确出路而不是静默失败
+      const embedded = window.self !== window.top
+      toast.error(embedded ? "嵌入面板中无法调起文件夹选择器" : "文件夹选择器被浏览器拦截", {
+        description: embedded
+          ? "请点击预览面板上方的「Open in New Tab」在新标签页中打开本页后再选择（Chrome / Edge），或安装 Windows 桌面版，可自由选择任意保存位置。"
+          : `请重试，或安装 Windows 桌面版自由选择保存位置。（${r.reason}）`,
+        duration: 9000,
+        action: embedded
+          ? {
+              label: "新标签页打开",
+              onClick: () => window.open(window.location.href, "_blank", "noopener"),
+            }
+          : undefined,
+      })
+      return
+    }
+    webDirRef.current = r.dir
+    setWebDirName(r.dir.name)
+    toast.success(`已选择保存位置：${r.dir.name}`, {
       description: "之后下载的壁纸将直接保存到该文件夹（本次会话内有效）。",
       duration: 6000,
     })
@@ -507,7 +550,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.1.1
+            v1.1.2
           </span>
           <button
             type="button"
@@ -579,7 +622,7 @@ export function WorkshopTab() {
                   </>
                 ) : (
                   <>
-                    {supportsDirectoryPicker() ? (
+                    {pickerSupported ? (
                       <button
                         type="button"
                         onClick={() => {
@@ -594,6 +637,14 @@ export function WorkshopTab() {
                     ) : (
                       <p className="px-2 py-2 text-[11px] leading-relaxed text-muted-foreground">
                         当前浏览器不支持自选位置，可改用 Chrome / Edge 或安装桌面版（支持自选保存位置）。
+                      </p>
+                    )}
+                    {/* 嵌入预览面板（iframe）提示：目录选择器会被浏览器拦截 */}
+                    {pickerSupported && embeddedView && (
+                      <p className="flex items-start gap-1.5 px-2 pb-1.5 pt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        <span className="mt-0.5 shrink-0 text-primary">ℹ</span>
+                        <span>嵌入面板中选不了本机文件夹：先点预览面板上方「Open in New Tab」
+                          在新标签页打开后再选，或安装桌面版。</span>
                       </p>
                     )}
                     {webDirName && (
@@ -915,7 +966,11 @@ export function WorkshopTab() {
       </AnimatePresence>
 
       {/* 令牌设置弹窗 */}
-      <TokenSettingsDialog open={tokenOpen} onOpenChange={setTokenOpen} />
+      <TokenSettingsDialog
+        open={tokenOpen}
+        onOpenChange={setTokenOpen}
+        probeWtId={list.items[0]?.id ?? null}
+      />
 
       {/* 壁纸预览弹窗 */}
       <WallpaperPreviewDialog

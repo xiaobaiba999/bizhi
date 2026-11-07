@@ -15,7 +15,7 @@ export function SiteHeader() {
           </span>
           <span className="hidden text-base font-bold sm:inline">壁纸工坊</span>
           <span className="hidden rounded-full border px-1.5 py-0.5 text-[9px] font-bold text-muted-foreground sm:inline">
-            v1.1.1
+            v1.1.2
           </span>
         </Link>
 

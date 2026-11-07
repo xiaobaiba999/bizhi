@@ -98,9 +98,53 @@ interface QrSessionObj {
   lpFails: number
   /** 诊断信息 */
   diag: QrDiag
+  /**
+   * haowallpaper.com 域 Cookie（wxLogin 回调设置的粘性会话等）。
+   * 官网前端在浏览器里发请求会自动携带；服务端全托管必须手动回放到
+   * stateLogin 轮询，否则负载均衡可能把请求分到另一台后端，永远查不到令牌。
+   */
+  zfCookies: Map<string, string>
 }
 
 const sessions = new Map<string, QrSessionObj>()
+
+/* ---------------- Cookie 回放（服务端全托管的关键） ---------------- */
+
+/** 兼容各运行时的 set-cookie 读取（undici 有 getSetCookie，旧环境只有 get） */
+function getSetCookieList(headers: Headers): string[] {
+  const h = headers as unknown as { getSetCookie?: () => string[] }
+  if (typeof h.getSetCookie === "function") {
+    try {
+      return h.getSetCookie()
+    } catch {
+      return []
+    }
+  }
+  const single = headers.get("set-cookie")
+  return single ? [single] : []
+}
+
+/** 把响应里的 set-cookie 收进 jar（仅保留 name=value 对） */
+function collectCookies(res: Response, jar: Map<string, string>): void {
+  try {
+    for (const raw of getSetCookieList(res.headers)) {
+      const pair = (raw.split(";")[0] ?? "").trim()
+      const eq = pair.indexOf("=")
+      if (eq <= 0) continue
+      const name = pair.slice(0, eq).trim()
+      const value = pair.slice(eq + 1).trim()
+      if (name && value) jar.set(name, value)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 拼接 Cookie 请求头（空 jar 返回 null） */
+function cookieHeader(jar: Map<string, string>): string | null {
+  if (jar.size === 0) return null
+  return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ")
+}
 
 /** 二维码图片直链（uuid 就绪后可用） */
 export function qrImageUrl(state: string): string | null {
@@ -124,6 +168,7 @@ export function newState(): string {
     phase: "starting",
     lpFails: 0,
     diag: { lpPolls: 0, lpLastErrcode: null, wxLoginStatus: null, statePolls: 0 },
+    zfCookies: new Map(),
   })
   // 顺手清理超过 10 分钟的旧会话，防止内存增长
   if (sessions.size > 32) {
@@ -311,6 +356,9 @@ async function finalizeLogin(s: QrSessionObj, wxCode: string): Promise<void> {
       cache: "no-store",
     })
     s.diag.wxLoginStatus = res.status
+    // 关键：回放官网设置的 Cookie（粘性负载均衡会话等）到后续 stateLogin 轮询，
+    // 与真实浏览器行为一致 —— 否则轮询可能落到另一台后端，永远查不到令牌
+    collectCookies(res, s.zfCookies)
     const text = await res.text()
     try {
       token = digToken(JSON.parse(text))
@@ -350,11 +398,16 @@ async function finalizeLogin(s: QrSessionObj, wxCode: string): Promise<void> {
   }
 }
 
-/** 直接调用官网 stateLogin（与旧版行为一致） */
+/** 直接调用官网 stateLogin（带上会话 Cookie，与浏览器行为一致） */
 async function pollStateLoginDirect(state: string): Promise<{ status: "pending" | "ok" | "expired" | "error"; token?: string; msg?: string }> {
+  const s = sessions.get(state)
+  const cookies = s ? cookieHeader(s.zfCookies) : null
   try {
     const res = await fetch(`${ZF_STATE_LOGIN_URL}?state=${encodeURIComponent(state)}`, {
-      headers: zfUpstreamHeaders({ Origin: API_BASE }),
+      headers: zfUpstreamHeaders({
+        Origin: API_BASE,
+        ...(cookies ? { Cookie: cookies } : {}),
+      }),
       signal: AbortSignal.timeout(10000),
       cache: "no-store",
     })

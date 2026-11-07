@@ -406,6 +406,22 @@ function createWindow(port) {
         } catch (e) {
           console.error("[desktop] 截图失败:", e);
         }
+        // 桌面桥接探针：验证 preload + IPC 全链路（getDownloadDir 走主进程）
+        try {
+          const probe = await win.webContents.executeJavaScript(
+            `(async () => {
+               const api = window.desktopApp;
+               if (!api) return { bridge: false };
+               const dir = await api.getDownloadDir();
+               const open = typeof api.chooseDownloadDir === "function";
+               return { bridge: true, chooseDialog: open, dir: String(dir) };
+             })()`,
+            true
+          );
+          console.log("[desktop] 桥接探针:", JSON.stringify(probe));
+        } catch (e) {
+          console.error("[desktop] 桥接探针失败:", e);
+        }
         setTimeout(() => app.exit(0), 400);
       }, 3000);
     });

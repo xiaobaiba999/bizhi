@@ -6,9 +6,11 @@ import {
   ClipboardPaste,
   ExternalLink,
   KeyRound,
+  Loader2,
   QrCode,
   RefreshCw,
   ShieldCheck,
+  ShieldX,
   Trash2,
   TriangleAlert,
 } from "lucide-react"
@@ -41,6 +43,9 @@ interface QrSession {
 
 type QrPhase = "loading" | "waiting" | "scanned" | "ok" | "expired" | "error"
 
+/** 令牌有效性验证状态（用官网接口实测，避免「令牌已失效却显示有效」） */
+type VerifyState = "idle" | "checking" | "valid" | "invalid" | "unknown"
+
 const QR_TTL = 170
 /** 二维码图片加载超时：超时判定「二维码显示失败」，不再停留在等待页 */
 const QR_LOAD_TIMEOUT = 12000
@@ -64,14 +69,21 @@ const POLL_FAIL_LIMIT = 3
 export function TokenSettingsDialog({
   open,
   onOpenChange,
+  probeWtId,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** 用于验证令牌有效性的壁纸 id（当前列表任一张，官网接口需要） */
+  probeWtId?: string | null
 }) {
   const [state, setState] = useState<TokenState>({ token: null, source: null, createdAt: null })
   const [mode, setMode] = useState<"qrcode" | "manual">("qrcode")
   const [manualInput, setManualInput] = useState("")
   const [saving, setSaving] = useState(false)
+  /** 令牌有效性（官网实测）：checking / valid / invalid / unknown */
+  const [verify, setVerify] = useState<VerifyState>("idle")
+  /** 失效原因（invalid 时展示） */
+  const [verifyMsg, setVerifyMsg] = useState<string | null>(null)
 
   // 扫码会话
   const [qr, setQr] = useState<QrSession | null>(null)
@@ -96,6 +108,38 @@ export function TokenSettingsDialog({
     }
   }, [])
 
+  // 验证令牌有效性：弹窗打开 / 令牌变化（重新扫码入库后）时，用官网接口实测一次
+  const runVerify = useCallback(async (wtId: string) => {
+    setVerify("checking")
+    setVerifyMsg(null)
+    try {
+      const res = await fetch(`/api/token/verify?wtId=${encodeURIComponent(wtId)}`, {
+        cache: "no-store",
+      })
+      const data = (await res.json().catch(() => null)) as { valid?: boolean | null; msg?: string } | null
+      if (data?.valid === true) setVerify("valid")
+      else if (data?.valid === false) {
+        setVerify("invalid")
+        setVerifyMsg(typeof data.msg === "string" ? data.msg : null)
+      } else setVerify("unknown")
+    } catch {
+      setVerify("unknown")
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open || !state.token || !probeWtId) return
+    let cancelled = false
+    // 微任务中执行，避免 effect 内同步 setState
+    Promise.resolve().then(() => {
+      if (cancelled) return
+      void runVerify(probeWtId)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open, state.token, probeWtId, runVerify])
+
   // 打开时重置 + 拉取令牌状态（微任务中执行，避免 effect 内同步 setState）
   useEffect(() => {
     if (!open) return
@@ -110,6 +154,8 @@ export function TokenSettingsDialog({
       setErrorMsg(null)
       setScannedNote(null)
       setCountdown(QR_TTL)
+      setVerify("idle")
+      setVerifyMsg(null)
       qrLoadedRef.current = false
       pollFailRef.current = 0
     })
@@ -320,12 +366,27 @@ export function TokenSettingsDialog({
         </DialogHeader>
 
         <div className="custom-scrollbar max-h-[calc(100vh-7rem)] overflow-y-auto p-5">
-          {/* 令牌状态卡 */}
+          {/* 令牌状态卡（官网实测有效性，不再凭「入库了」就显示有效） */}
           {state.token ? (
-            <div className="mb-4 rounded-xl border bg-muted/40 p-3.5">
+            <div
+              className={cn(
+                "mb-4 rounded-xl border p-3.5",
+                verify === "invalid" ? "border-amber-500/40 bg-amber-500/5" : "bg-muted/40"
+              )}
+            >
               <div className="flex items-center gap-2">
-                <ShieldCheck className="size-5 shrink-0 text-emerald-500" />
-                <span className="text-sm font-bold">令牌有效</span>
+                {verify === "invalid" ? (
+                  <ShieldX className="size-5 shrink-0 text-amber-500" />
+                ) : (
+                  <ShieldCheck
+                    className={cn("size-5 shrink-0", verify === "valid" ? "text-emerald-500" : "text-muted-foreground")}
+                  />
+                )}
+                <span className="text-sm font-bold">
+                  {verify === "invalid" ? "令牌已失效" : "令牌有效"}
+                  {verify === "checking" && " · 验证中…"}
+                  {verify === "valid" && " · 已验证"}
+                </span>
                 <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
                   {state.token}
                 </span>
@@ -334,11 +395,39 @@ export function TokenSettingsDialog({
                     扫码登录
                   </span>
                 )}
+                {verify === "checking" && (
+                  <Loader2 className="ml-auto size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                )}
               </div>
               <p className="mt-1.5 pl-7 text-[11px] leading-relaxed text-muted-foreground">
-                下载原图时自动使用令牌获取与官网完全一致的原图
+                {verify === "invalid"
+                  ? "下载原图已退回预览质量（约 1100px）。请重新扫码登录获取新令牌，即刻恢复高清原图。"
+                  : "下载原图时自动使用令牌获取与官网完全一致的原图"}
               </p>
-              <div className="mt-2.5 pl-7">
+              {verify === "invalid" && verifyMsg && (
+                <p className="mt-1 pl-7 font-mono text-[10px] text-muted-foreground/70">（{verifyMsg}）</p>
+              )}
+              <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-7">
+                {verify === "invalid" && (
+                  <button
+                    type="button"
+                    onClick={() => setMode("qrcode")}
+                    className="inline-flex h-7 items-center gap-1 rounded-full bg-primary px-3 text-[11px] font-bold text-primary-foreground transition-all hover:brightness-105"
+                  >
+                    <QrCode className="size-3" />
+                    重新扫码获取
+                  </button>
+                )}
+                {verify === "unknown" && probeWtId && (
+                  <button
+                    type="button"
+                    onClick={() => void runVerify(probeWtId)}
+                    className="inline-flex h-7 items-center gap-1 rounded-full border px-3 text-[11px] font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+                  >
+                    <RefreshCw className="size-3" />
+                    重新验证
+                  </button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
