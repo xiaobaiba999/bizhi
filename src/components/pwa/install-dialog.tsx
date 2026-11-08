@@ -236,21 +236,22 @@ export function AppInstallDialog() {
               </p>
               <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
                 正经的桌面软件安装包：向导式安装、独立窗口运行、桌面与开始菜单快捷方式、
-                壁纸自动存入「下载」文件夹，<span className="font-semibold text-foreground">可在「下载位置」里调起系统磁盘文件夹任意选择保存位置（v1.1.2 新增）</span>；
+                壁纸自动存入「下载」文件夹，可在「下载位置」里调起系统磁盘文件夹任意选择保存位置；
                 卸载走系统应用管理，勾选删除数据即可彻底清理。
               </p>
               <a
-                href="/desktop/壁纸工坊-Setup-1.1.2.exe"
+                href="/desktop/壁纸工坊-Setup-1.2.3.exe"
                 download
                 className="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
               >
                 <Download className="size-4" />
-                下载安装包（v1.1.2 · 约 168MB）
+                下载安装包（v1.2.3 · 约 168MB）
               </a>
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/80">
-                v1.1.2 更新：下载位置支持调起系统磁盘文件夹自定义选择（桌面版）；
-                修复扫码登录完成后令牌获取失败的问题；令牌有效期自动检测，失效会提示重新扫码。
-                安装过旧版本（v1.1.1）的用户请下载新版重新安装覆盖。未签名应用首次运行时
+                v1.2.3 更新：彻底修复「令牌失效」误报（根源是官网新增人机验证，旧版未适配导致每次下载都报失效）；
+                扫码登录改为服务端全托管，二维码稳定显示、扫码即自动入库；
+                覆盖安装升级不再需要先卸载（旧数据库自动备份升级）。
+                安装过旧版本的用户直接下载新版覆盖安装即可，无需卸载。未签名应用首次运行时
                 SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。
               </p>
             </div>

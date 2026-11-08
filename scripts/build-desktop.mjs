@@ -207,7 +207,16 @@ if (!wantAssemble && !wantLinux && !wantWin) {
   process.exit(0);
 }
 
-buildNext();
+// WF_SKIP_NEXT_BUILD=1：.next-desktop 已存在时跳过生产构建（分步构建用）
+if (process.env.WF_SKIP_NEXT_BUILD !== "1") {
+  buildNext();
+} else {
+  step("跳过 Next.js 生产构建（WF_SKIP_NEXT_BUILD=1）");
+  if (!fs.existsSync(path.join(DIST, "standalone", "server.js"))) {
+    console.error("[desktop-build] .next-desktop/standalone 不存在，无法跳过构建");
+    process.exit(1);
+  }
+}
 assemble();
 if (wantLinux) packageLinux();
 if (wantWin) packageWin();
