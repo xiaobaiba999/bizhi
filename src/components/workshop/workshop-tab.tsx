@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { APP_VERSION } from "@/lib/version"
 import { ZHEFENG_CATEGORIES, proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
 import {
   chooseDesktopDownloadDir,
@@ -550,7 +551,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.2.3
+            v{APP_VERSION}
           </span>
           <button
             type="button"

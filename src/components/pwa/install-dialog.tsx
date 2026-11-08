@@ -16,6 +16,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { APP_VERSION, SETUP_EXE_NAME } from "@/lib/version"
 import { usePwaStore } from "@/lib/pwa-store"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -240,17 +241,17 @@ export function AppInstallDialog() {
                 卸载走系统应用管理，勾选删除数据即可彻底清理。
               </p>
               <a
-                href="/desktop/壁纸工坊-Setup-1.2.3.exe"
+                href={`/desktop/${SETUP_EXE_NAME}`}
                 download
                 className="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
               >
                 <Download className="size-4" />
-                下载安装包（v1.2.3 · 约 168MB）
+                下载安装包（v{APP_VERSION} · 约 168MB）
               </a>
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/80">
-                v1.2.3 更新：彻底修复「令牌失效」误报（根源是官网新增人机验证，旧版未适配导致每次下载都报失效）；
-                扫码登录改为服务端全托管，二维码稳定显示、扫码即自动入库；
-                覆盖安装升级不再需要先卸载（旧数据库自动备份升级）。
+                v{APP_VERSION} 更新：修复「必须手动删除整个目录才能重新安装」的问题 ——
+                旧版卸载器未完成时，新安装包会自动清理残留后继续安装，无需再手动删；
+                卸载时同步清理本地缓存目录，卸载更干净；安装到中文路径（如 E:\壁纸工坊\）完全支持。
                 安装过旧版本的用户直接下载新版覆盖安装即可，无需卸载。未签名应用首次运行时
                 SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。
               </p>

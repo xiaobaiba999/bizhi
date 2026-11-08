@@ -33,6 +33,7 @@ win:
         - x64
 
 # NSIS 安装器：向导式安装；卸载时连用户数据目录（数据库）一并清理 → 干净卸载
+# include：覆盖安装自愈钩子（旧卸载器失败时自动清理残留并继续安装，见 build/installer.nsh）
 nsis:
   oneClick: false
   perMachine: false
@@ -44,6 +45,7 @@ nsis:
   shortcutName: 壁纸工坊
   artifactName: 壁纸工坊-Setup-${version}.${ext}
   uninstallDisplayName: 壁纸工坊
+  include: installer.nsh
 
 linux:
   icon: build/icon.png

@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { ImageIcon } from "lucide-react"
 import { InstallAppButton } from "@/components/pwa/install-button"
+import { APP_VERSION } from "@/lib/version"
 
 /** 顶部导航：壁纸工坊（哲风壁纸实时获取 + 下载原图） + 安装应用 */
 export function SiteHeader() {
@@ -15,7 +16,7 @@ export function SiteHeader() {
           </span>
           <span className="hidden text-base font-bold sm:inline">壁纸工坊</span>
           <span className="hidden rounded-full border px-1.5 py-0.5 text-[9px] font-bold text-muted-foreground sm:inline">
-            v1.2.3
+            v{APP_VERSION}
           </span>
         </Link>
 
