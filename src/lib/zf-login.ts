@@ -47,9 +47,13 @@ export interface LoginEndpointStatus {
   zf: boolean
 }
 
-/** 令牌获取原图直链接口 */
+/**
+ * 令牌获取原图直链接口。
+ * 官网前端实测：必须带 __media=1&__responseCodec=aeg-v2 查询参数，
+ * 否则一律返回 305 [错误的请求 -> 3004]（与令牌是否有效无关）。
+ */
 export function zfCompleteUrl(wtId: string): string {
-  return `${API_BASE}/link/common/file/getCompleteUrl/${encodeURIComponent(wtId)}`
+  return `${API_BASE}/link/common/file/getCompleteUrl/${encodeURIComponent(wtId)}?__media=1&__responseCodec=aeg-v2`
 }
 
 const UA =

@@ -53,11 +53,11 @@ interface ListState {
 
 const INITIAL: ListState = { items: [], page: 0, hasMore: true, loading: false, error: null }
 
-/** 下载原图代理链接（带 wtId：有令牌时走官网原图直链） */
+/** 下载原图代理链接（wtId 传壁纸详情 id：官网 getCompleteUrl 只认它，文件 id 会 3005） */
 function downloadUrl(w: ZhefengWallpaper) {
   return `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
     w.title
-  )}&wtId=${encodeURIComponent(w.id)}`
+  )}&wtId=${encodeURIComponent(w.wtId || w.id)}`
 }
 
 /* ---------- 网页版自选保存目录（File System Access API，Chrome / Edge 支持） ---------- */
@@ -969,7 +969,7 @@ export function WorkshopTab() {
       <TokenSettingsDialog
         open={tokenOpen}
         onOpenChange={setTokenOpen}
-        probeWtId={list.items[0]?.id ?? null}
+        probeWtId={list.items[0]?.wtId ?? list.items[0]?.id ?? null}
       />
 
       {/* 壁纸预览弹窗 */}

@@ -90,19 +90,61 @@ function chosenDownloadDir() {
   return typeof dir === "string" && dir.trim() ? dir.trim() : null;
 }
 
-/** 首次运行：复制安装包内置的空数据库模板（已含全部表结构） */
+/**
+ * 当前应用所需的数据库表（与 prisma/schema.prisma 保持一致）。
+ * 用于升级校验：旧版本数据库缺表时，新版 Prisma 会在运行时报错，
+ * 表现为「安装了新版本打不开、必须完整卸载（清掉用户数据）才能用」。
+ * —— 启动时检测到结构不符就自动备份旧库并重建，彻底消除该症状。
+ */
+const REQUIRED_DB_TABLES = ["ZfToken", "Download"];
+
+/** SQLite 文件中表名以明文形式存在于 sqlite_master 的建表语句里；
+ *  用「原始字节包含表名」做一次轻量结构校验（无需 sqlite 驱动） */
+function dbHasAllTables(dbFile) {
+  try {
+    const head = fs.readFileSync(dbFile);
+    const text = head.toString("latin1");
+    return REQUIRED_DB_TABLES.every((t) => text.includes(`TABLE ${t}`) || text.includes(`TABLE\`${t}\``) || text.includes(`TABLE "${t}"`));
+  } catch {
+    return false;
+  }
+}
+
+/** 首次运行：复制安装包内置的空数据库模板（已含全部表结构）。
+ *  升级运行：旧库结构与新版本不符（缺表）时，备份旧库后重建模板，
+ *  避免新版 Prisma 读旧库报错导致「升级即白屏、卸载重装才恢复」 */
 function ensureDatabase() {
   const dir = dataDir();
   dbPath = path.join(dir, "wallpaper.db");
-  if (fs.existsSync(dbPath)) return dbPath;
 
   const template = IS_DEV
     ? path.join(__dirname, "..", "release", "resources", "empty.db")
     : path.join(process.resourcesPath, "app", "empty.db");
 
   fs.mkdirSync(dir, { recursive: true });
+
+  if (fs.existsSync(dbPath)) {
+    if (dbHasAllTables(dbPath)) return dbPath;
+    // 结构不符（旧版本库 / 损坏库）：备份后重建
+    const backup = path.join(dir, `wallpaper.db.bak-${Date.now()}`);
+    try {
+      fs.copyFileSync(dbPath, backup);
+      console.log(`[desktop] 数据库结构已升级，旧库备份至 ${backup}`);
+    } catch (e) {
+      console.error("[desktop] 备份旧数据库失败（将继续重建）:", e);
+    }
+    try {
+      fs.rmSync(dbPath, { force: true });
+      fs.rmSync(path.join(dir, "wallpaper.db-journal"), { force: true });
+      fs.rmSync(path.join(dir, "wallpaper.db-wal"), { force: true });
+      fs.rmSync(path.join(dir, "wallpaper.db-shm"), { force: true });
+    } catch (e) {
+      console.error("[desktop] 清理旧数据库文件失败:", e);
+    }
+  }
+
   fs.copyFileSync(template, dbPath);
-  console.log("[desktop] 首次运行，已初始化数据库:", dbPath);
+  console.log("[desktop] 数据库已初始化:", dbPath);
   return dbPath;
 }
 

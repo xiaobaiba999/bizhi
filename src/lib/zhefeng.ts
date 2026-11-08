@@ -11,8 +11,10 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 export interface ZhefengWallpaper {
-  /** 图片唯一 id（CDN 文件名，去扩展名） */
+  /** 图片文件 id（CDN 文件名去扩展名，与官网详情 id 一致） */
   id: string
+  /** 壁纸详情 id（卡片 /homeViewLook/<id> 链接，getCompleteUrl 必须用它而非文件 id） */
+  wtId: string
   /** 清洗后的标题（去掉「哲风壁纸」后缀） */
   title: string
   /** 分辨率标识：4K / 7K / 2K … */
@@ -104,12 +106,18 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
     const src = imgMatch[1]
     const alt = imgMatch[2]
 
-    // 图片 id
+    // 图片 id（文件 id：下载记录的键，与图片直链一一对应）
     const dot = src.lastIndexOf(".")
     if (dot === -1) continue
     const id = src.slice(src.lastIndexOf("/") + 1, dot)
     if (seen.has(id)) continue
     seen.add(id)
+
+    // 壁纸详情 id（卡片内 /homeViewLook/<id> 链接）。
+    // 官网 getCompleteUrl 必须用这个 id（它与文件 id 是两个不同的数字），
+    // 否则返回 305 [错误的请求 -> 3005]；缺失时回退文件 id
+    const lookMatch = /href="\/homeViewLook\/([0-9]{6,32})"/.exec(chunk)
+    const wtId = lookMatch ? lookMatch[1] : id
 
     // 缩略图：优先取 srcset 里实际存在的最大变体（s320 并非全量存在，s240 才有）
     const srcsetMatch = /<img[^>]*srcset="([^"]+)"/.exec(chunk)
@@ -138,6 +146,7 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
 
     items.push({
       id,
+      wtId,
       title: cleanTitle(alt) || `壁纸 ${id.slice(-6)}`,
       resolution: parseResolution(alt),
       src,
