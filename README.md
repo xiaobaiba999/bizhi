@@ -2,7 +2,7 @@
 
 本仓库是「壁纸工坊」的纯静态网页版，由部署脚本自动推送，站点地址：
 
-**https://xiaobaiba999.github.io/bizhi/**
+**https://xiaobaiba999.github.io/bizhi**
 
 ## 功能
 
@@ -22,12 +22,3 @@
 再通过 GitHub REST API 一键推送（见源码项目 `scripts/deploy-to-github.mjs`）。
 
 > 本站以 `/bizhi` 子路径托管构建，请勿改名或移动文件，否则资源路径会失效。
-
-## 与 Windows 桌面版的差异
-
-| 能力 | 本网页版 | Windows 桌面版 exe |
-|------|---------|-------------------|
-| 浏览 / 下载壁纸 | ✅ | ✅ |
-| 下载记录永久保留 | ✅ 浏览器 localStorage | ✅ 应用数据库 |
-| 下载分辨率 | CDN 直链（1-2K 预览级） | 配置令牌后最高 7K |
-| 哲风令牌登录 | ❌（需服务端人机验证） | ✅ |
