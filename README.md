@@ -19,9 +19,9 @@
 
 见仓库 **[Releases](https://github.com/xiaobaiba999/bizhi/releases)**：
 
-- `WallpaperWorkshop-Setup-v1.3.2.exe`（约 174MB）—— Windows 桌面安装版，
+- `WallpaperWorkshop-Setup-v1.3.3.exe`（约 174MB）—— Windows 桌面安装版，
   下载记录永久保存在用户数据目录（卸载重装自动恢复）
-- `WallpaperWorkshop-Web-v1.3.2.zip`（约 0.9MB）—— 本静态网页版的离线压缩包
+- `WallpaperWorkshop-Web-v1.3.3.zip`（约 0.9MB）—— 本静态网页版的离线压缩包
 
 ## 仓库结构
 
