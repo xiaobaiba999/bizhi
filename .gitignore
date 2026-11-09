@@ -51,3 +51,6 @@ next-env.d.ts
 /.api-stash/
 /.desktop-stash/
 /public/*.zip
+
+# 下载记录 JSON 档案（运行时产物，桌面版位于用户数据目录）
+/db/downloads.json
