@@ -26,6 +26,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const APP_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 const API_DIR = path.join(ROOT, "src", "app", "api");
 const API_STASH = path.join(ROOT, ".api-stash");
 /** 桌面安装包不入静态站点（173MB 超 GitHub 单文件 100MB 限制，也无意义） */
@@ -156,11 +157,21 @@ try {
 - **PWA 安装**：Chrome / Edge 地址栏「安装」即可装成独立窗口应用，
   正常卸载不留残留
 
+## 下载桌面安装版 / 网页版压缩包
+
+见仓库 **[Releases](https://github.com/xiaobaiba999/bizhi/releases)**：
+
+- \`WallpaperWorkshop-Setup-v${APP_VERSION}.exe\`（约 174MB）—— Windows 桌面安装版，
+  下载记录永久保存在用户数据目录（卸载重装自动恢复）
+- \`WallpaperWorkshop-Web-v${APP_VERSION}.zip\`（约 0.9MB）—— 本静态网页版的离线压缩包
+
 ## 仓库结构
 
-仓库根目录即静态站点本身（\`index.html\` / \`_next/\` / \`sw.js\` 等），
-由项目源码执行 \`node scripts/build-gh-pages.mjs ${basePath || ""}\` 构建产出，
-再通过 GitHub REST API 一键推送（见源码项目 \`scripts/deploy-to-github.mjs\`）。
+- \`main\` 分支：即本静态站点（\`index.html\` / \`_next/\` / \`sw.js\` 等），
+  由项目源码执行 \`node scripts/build-gh-pages.mjs ${basePath || ""}\` 构建产出，
+  再通过 GitHub REST API 一键推送（见源码项目 \`scripts/deploy-to-github.mjs\`）
+- \`source\` 分支：完整项目源码快照（Next.js 16 + Electron + NSIS），
+  由 \`node scripts/push-source-to-github.mjs\` 推送
 
 > 本站以 \`${basePath || "/"}\` 子路径托管构建，请勿改名或移动文件，否则资源路径会失效。
 `;

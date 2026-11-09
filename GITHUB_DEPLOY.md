@@ -34,6 +34,27 @@ node scripts/deploy-to-github.mjs <token>  # 一键推送到仓库并开启 Page
 约 1 分钟后访问 **https://xiaobaiba999.github.io/bizhi/** 即可。
 token 用完可随时到 GitHub → Settings → Developer settings 里删除（Revoke）。
 
+### 部署状态（2026-11-09 v1.3.2 实例）
+
+- ✅ 静态站已上线：https://xiaobaiba999.github.io/bizhi/（main 分支）
+- ✅ 完整源码快照：仓库 `source` 分支（`node scripts/push-source-to-github.mjs <token>`）
+- ✅ 桌面安装包托管：仓库 **Releases → v1.3.2**
+  - https://github.com/xiaobaiba999/bizhi/releases/download/v1.3.2/WallpaperWorkshop-Setup-v1.3.2.exe
+  - https://github.com/xiaobaiba999/bizhi/releases/download/v1.3.2/WallpaperWorkshop-Web-v1.3.2.zip
+  - （Release 附件名仅支持 ASCII，故用英文命名；重新分发脚本见下方第六节）
+
+### 注意：空仓库首次部署会 409
+
+GitHub 对**完全空仓库**的 Git Data API（blobs/trees）返回 409
+"Git Repository is empty"。首次部署前先用 Contents API 引导一个提交：
+
+```bash
+# PUT /repos/xiaobaiba999/bizhi/contents/README.md 创建首个提交后，再跑 deploy 脚本
+curl -X PUT -H "Authorization: Bearer <token>" \
+  https://api.github.com/repos/xiaobaiba999/bizhi/contents/README.md \
+  -d '{"message":"bootstrap","content":"<base64>"}'
+```
+
 ## 二、手动部署（不想用 token 时）
 
 1. 本地构建：`node scripts/build-gh-pages.mjs /bizhi`
@@ -77,9 +98,33 @@ token 用完可随时到 GitHub → Settings → Developer settings 里删除（
 
 **Q：GitHub 上传提示文件太大？**
 本项目静态产物约 0.9MB，远低于限制；Windows 安装包（约 175MB）**不要**传进仓库
-（超 GitHub 单文件 100MB 上限）——如需在 GitHub 分发 exe，请使用仓库 **Releases** 页面
-的附件上传（单附件上限 2GB）。
+（超 GitHub 单文件 100MB 上限）——安装包已托管在仓库 **Releases** 页面的附件
+（单附件上限 2GB）：https://github.com/xiaobaiba999/bizhi/releases
 
 **Q：想改到别的仓库 / 子路径？**
 重新构建时传相同子路径参数即可：`node scripts/build-gh-pages.mjs /你的子路径`，
 并同步修改 `scripts/deploy-to-github.mjs` 顶部的 `OWNER / REPO / BASE_PATH` 常量。
+
+## 六、发布新版本 Release（安装包托管）
+
+```bash
+# 1）重建安装包与静态站（版本号先在 package.json 里升好）
+bun run desktop:assemble && bun run desktop:win
+node scripts/build-gh-pages.mjs /bizhi
+
+# 2）推送静态站 + 源码分支
+node scripts/deploy-to-github.mjs <token>
+node scripts/push-source-to-github.mjs <token>
+
+# 3）建 Release 并上传附件（ASCII 文件名，GitHub 附件名不支持中文）
+curl -X POST -H "Authorization: Bearer <token>" \
+  https://api.github.com/repos/xiaobaiba999/bizhi/releases \
+  -d '{"tag_name":"v1.3.2","name":"壁纸工坊 v1.3.2","body":"...","target_commitish":"main"}'
+# 返回的 id 用于上传附件：
+curl -X POST -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @download/壁纸工坊-Setup-1.3.2.exe \
+  "https://uploads.github.com/repos/xiaobaiba999/bizhi/releases/<id>/assets?name=WallpaperWorkshop-Setup-v1.3.2.exe"
+```
+
+（网页版 zip 同法上传，`name=WallpaperWorkshop-Web-v<版本>.zip`。）
