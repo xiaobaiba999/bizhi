@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="864" height="1152" viewBox="0 0 864 1152">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fdeaf0"/>
+      <stop offset="0.55" stop-color="#f6bfd0"/>
+      <stop offset="1" stop-color="#e48fa8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.35" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="864" height="1152" fill="url(#bg)"/>
+  <rect width="864" height="1152" fill="url(#glow)"/>
+  <circle cx="708.4799999999999" cy="184.32" r="150" fill="#ffffff" opacity="0.18"/>
+  <circle cx="155.51999999999998" cy="898.5600000000001" r="220" fill="#ffffff" opacity="0.10"/>
+  <circle cx="777.6" cy="760.32" r="90" fill="#ffffff" opacity="0.12"/>
+  <path d="M0 990.72 C 259.2 921.6, 604.8 1082.8799999999999, 864 967.68 L 864 1152 L 0 1152 Z" fill="#ffffff" opacity="0.16"/>
+  <path d="M0 1059.8400000000001 C 302.4 990.72, 561.6 1128.96, 864 1036.8 L 864 1152 L 0 1152 Z" fill="#ffffff" opacity="0.22"/>
+  <text x="432" y="556" font-size="300" text-anchor="middle" dominant-baseline="middle" opacity="0.92">💄</text>
+  <text x="432" y="806.4" font-size="56" font-weight="700" text-anchor="middle" fill="#ffffff" opacity="0.95" font-family="PingFang SC, Microsoft YaHei, sans-serif">护肤分享</text>
+  <rect x="342" y="858.24" width="180" height="56" rx="28" fill="#ffffff" opacity="0.9"/>
+  <text x="432" y="886.24" font-size="30" font-weight="600" text-anchor="middle" dominant-baseline="middle" fill="#e48fa8" font-family="PingFang SC, Microsoft YaHei, sans-serif"># 美妆</text>
+</svg>

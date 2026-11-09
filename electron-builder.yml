@@ -1,0 +1,56 @@
+appId: com.wallpaperworkshop.app
+productName: 壁纸工坊
+copyright: Copyright © 2026 壁纸工坊
+directories:
+  app: release/app
+  output: release/out
+  buildResources: build
+
+# 精简 app 壳（release/app：仅 desktop/ 壳代码 + 无依赖 package.json）→ asar 不含 node_modules
+files:
+  - "**/*"
+asar: true
+compression: normal
+beforeBuild: scripts/eb-before-build.cjs
+# 免 wine 说明：通过 build-desktop.mjs 里的补丁，NSIS 卸载器用原生
+# UninstallerReader 提取，Linux 交叉打包无需系统 wine
+electronLanguages:
+  - zh-CN
+  - en-US
+
+# 注意：from 必须是 release/resources（而非其子目录 server）——
+# electron-builder 的过滤器会无条件丢弃 fileset 根下的 node_modules，
+# 提升一层后 server/node_modules 属于「子 node_modules」，可正常复制
+extraResources:
+  - from: release/resources
+    to: app
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+# NSIS 安装器：向导式安装；卸载只清安装目录（程序本体），
+# 用户数据目录（%APPDATA%\壁纸工坊：下载记录数据库、设置）永久保留 ——
+# 重装后自动恢复已下载记录（v1.3.2 起按产品约定不再随卸载删除）
+# include：覆盖安装自愈钩子（旧卸载器失败时自动清理残留并继续安装，见 build/installer.nsh）
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 壁纸工坊
+  artifactName: 壁纸工坊-Setup-${version}.${ext}
+  uninstallDisplayName: 壁纸工坊
+  include: installer.nsh
+
+linux:
+  icon: build/icon.png
+  category: Graphics
+  target:
+    - dir
