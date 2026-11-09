@@ -20,6 +20,9 @@ import {
 import {
   getLocalDownloadIds,
   clearLocalDownloads,
+  listLocalDownloads,
+  recordLocalDownload,
+  replaceLocalDownloads,
 } from "@/lib/download-store"
 
 /** 静态导出子路径（GitHub Pages 项目页如 /bizhi；根路径 / dev / 桌面版为空串） */
@@ -154,15 +157,67 @@ export async function loadWallpaperPage(
   }
 }
 
-/** 清空下载记录（被隐藏的壁纸恢复显示）——按模式分流 */
+/** 清空下载记录（被隐藏的壁纸恢复显示）——按模式分流；两种模式都同步清 localStorage 镜像 */
 export async function clearAllDownloads(): Promise<void> {
   const mode = await detectWorkshopMode()
+  clearLocalDownloads()
   if (mode === "static") {
-    clearLocalDownloads()
     return
   }
   const res = await fetch("/api/wallpapers/downloads", { method: "DELETE" })
   if (!res.ok) throw new Error("清空失败")
+}
+
+/* ---------------- 下载记录跨版本永久化（v1.3.3） ---------------- */
+
+/**
+ * 下载成功后写 localStorage 镜像（双模式统一调用）。
+ * 服务器模式另有 SQLite + JSON 档案两层；静态模式本层即主存储。
+ * 任何一层存活即可在重装 / 升级后恢复全部记录。
+ */
+export function mirrorDownloadRecord(w: { id: string; title: string; src: string }) {
+  try {
+    if (w.id) recordLocalDownload(w)
+  } catch {
+    // 忽略：镜像失败不影响下载本身
+  }
+}
+
+/**
+ * 服务器模式启动时同步：localStorage 镜像 → POST /downloads/sync，
+ * 服务器做 SQLite ∪ JSON 档案 ∪ 推送记录 并集合并并全量返回，
+ * 前端用返回值回写 localStorage —— 三层完全一致。
+ * 返回本次新并入服务器的新增条数（> 0 时调用方应刷新列表让过滤生效）。
+ */
+export async function syncDownloadRecords(): Promise<number> {
+  const mode = await detectWorkshopMode()
+  if (mode !== "server") return 0
+  try {
+    const local = listLocalDownloads()
+    const res = await fetch("/api/wallpapers/downloads/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: local.map((i) => ({
+          id: i.id,
+          title: i.title,
+          src: i.src,
+          downloadedAt: i.downloadedAt,
+        })),
+      }),
+    })
+    if (!res.ok) return 0
+    const data = (await res.json()) as {
+      added?: number
+      items?: { id: string; title: string; src: string; downloadedAt: number }[]
+    }
+    if (Array.isArray(data.items)) {
+      replaceLocalDownloads(data.items)
+    }
+    return data.added ?? 0
+  } catch {
+    return 0 // 同步失败不阻塞主流程（下次启动再试）
+  }
 }
 
 /* ------------------------- 静态模式下载（blob → JPG） ------------------------- */

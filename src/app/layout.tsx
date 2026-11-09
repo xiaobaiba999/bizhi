@@ -56,6 +56,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-[#f7f7f8] dark:bg-background">
+        {/* 哲风图片 CDN 预连接：省掉首批壁纸的 DNS + TLS 建立耗时
+            （React 19 自动把 <link> 提升到 <head>；App Router 托管 head，不能手写 <head>） */}
+        <link rel="preconnect" href="https://img.haowallpaper.com" />
+        <link rel="dns-prefetch" href="https://img.haowallpaper.com" />
         {children}
         <PwaProvider />
         <Toaster richColors position="top-center" />

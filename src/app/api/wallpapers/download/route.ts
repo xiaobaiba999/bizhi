@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { isZhefengImageUrl, upstreamHeaders } from "@/lib/zhefeng"
 import { zfCompleteUrl, zfUpstreamHeaders } from "@/lib/zf-login"
 import { ensureCertified, invalidateCertification } from "@/lib/zf-certify"
+import { syncArchiveAfterDownload } from "@/lib/download-archive"
 
 /** 存储统一格式：所有壁纸转存为 JPG（产品约定，动态内容已在抓取层剔除） */
 const STORE_EXT = "jpg"
@@ -138,14 +139,23 @@ export async function GET(req: NextRequest) {
   const fileId = fileIdOf(src) ?? ""
   const wtId = wtIdParam || fileId
 
-  // 记录下载（upsert：重复下载刷新时间与质量；键 = 文件 id，与列表过滤一致）
+  // 记录下载（upsert：重复下载刷新时间与质量；键 = 文件 id，与列表过滤一致）。
+  // v1.3.3：同时同步到 JSON 档案（与数据库同目录），三层保险让记录跨版本永久保留
   const recordDownload = async (quality: "preview" | "original") => {
     if (!fileId) return
     try {
+      const downloadedAt = new Date()
       await db.download.upsert({
         where: { wtId: fileId },
-        create: { wtId: fileId, title: safeFilename(name), src, quality },
-        update: { quality, downloadedAt: new Date() },
+        create: { wtId: fileId, title: safeFilename(name), src, quality, downloadedAt },
+        update: { quality, downloadedAt },
+      })
+      await syncArchiveAfterDownload({
+        wtId: fileId,
+        title: safeFilename(name),
+        src,
+        quality,
+        downloadedAt,
       })
     } catch (e) {
       console.error("record download error:", e)

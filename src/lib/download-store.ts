@@ -63,6 +63,27 @@ export function recordLocalDownload(w: { id: string; title: string; src: string 
   writeAll(items)
 }
 
+/**
+ * 全量替换（v1.3.3）：启动时与服务器三方合并后，用服务器返回的
+ * 合并全集回写本层，保证 localStorage 镜像与 SQLite / JSON 档案一致。
+ */
+export function replaceLocalDownloads(
+  items: { id: string; title: string; src: string; downloadedAt: number }[]
+) {
+  const clean = items
+    .filter((i) => i && typeof i.id === "string" && i.id)
+    .map((i) => ({
+      id: i.id,
+      title: typeof i.title === "string" ? i.title : "壁纸",
+      src: typeof i.src === "string" ? i.src : "",
+      downloadedAt:
+        typeof i.downloadedAt === "number" && i.downloadedAt > 0
+          ? i.downloadedAt
+          : Date.now(),
+    }))
+  writeAll(clean)
+}
+
 /** 清空全部记录（被隐藏的壁纸恢复显示） */
 export function clearLocalDownloads() {
   if (typeof window === "undefined") return

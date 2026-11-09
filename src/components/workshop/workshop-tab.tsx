@@ -30,8 +30,10 @@ import {
   detectWorkshopMode,
   loadWallpaperPage,
   clearAllDownloads,
+  mirrorDownloadRecord,
   prepareWallpaperBlob,
   saveBlobViaAnchor,
+  syncDownloadRecords,
   type WorkshopMode,
 } from "@/lib/workshop-source"
 import {
@@ -245,6 +247,20 @@ export function WorkshopTab() {
     }
   }, [])
 
+  // 服务器模式启动同步（v1.3.3）：localStorage 镜像 ↔ SQLite ↔ JSON 档案三方合并 ——
+  // 装新版本 / 卸载重装 / 数据库重建后，任何一层存活的下载记录都会恢复，
+  // 「隐藏已下载」过滤继续生效；本次新并入记录时刷新列表让过滤立即生效
+  useEffect(() => {
+    if (mode !== "server") return
+    let alive = true
+    void syncDownloadRecords().then((added) => {
+      if (alive && added > 0) setReloadNonce((n) => n + 1)
+    })
+    return () => {
+      alive = false
+    }
+  }, [mode])
+
   // 桌面版：下载落盘完成后提示保存位置，并可一键调起磁盘文件管理器
   useEffect(() => {
     return onDesktopDownloadDone(({ path, filename }) => {
@@ -359,6 +375,46 @@ export function WorkshopTab() {
     return () => io.disconnect()
   }, [loadMore])
 
+  // 空闲预取（v1.3.3 提速）：当前页渲染完成后，浏览器空闲时预抓「下一页」
+  // 列表数据与缩略图 —— 用户滚动到底时数据与图片均已就绪（秒出、不转圈）。
+  // 列表落入模块/服务端缓存；缩略图错峰预热进 HTTP / Service Worker 持久缓存，
+  // 不会与视口内图片抢带宽；同一页只预热一次。
+  const warmedRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (mode === "detecting" || list.page === 0 || !list.hasMore || list.loading) return
+    const nextPage = list.page + 1
+    const warmKey = `${catKey}|${hideDownloaded ? 1 : 0}|${nextPage}`
+    if (warmedRef.current.has(warmKey)) return
+    warmedRef.current.add(warmKey)
+
+    let canceled = false
+    const run = () => {
+      if (canceled) return
+      void loadWallpaperPage(catKey, nextPage, hideDownloaded)
+        .then((data) => {
+          if (canceled) return
+          data.items.forEach((w, i) => {
+            setTimeout(() => {
+              if (canceled) return
+              const img = new Image()
+              img.decoding = "async"
+              img.src = w.thumb
+            }, 200 + i * 150)
+          })
+        })
+        .catch(() => {})
+    }
+    const ric = typeof window.requestIdleCallback === "function"
+    const handle = ric
+      ? window.requestIdleCallback(run, { timeout: 4000 })
+      : window.setTimeout(run, 1500)
+    return () => {
+      canceled = true
+      if (ric) window.cancelIdleCallback(handle)
+      else window.clearTimeout(handle)
+    }
+  }, [mode, catKey, list.page, list.hasMore, list.loading, hideDownloaded])
+
   const toggle = (w: ZhefengWallpaper) => {
     setSelected((prev) => {
       if (prev.some((p) => p.id === w.id)) return prev.filter((p) => p.id !== w.id)
@@ -420,9 +476,11 @@ export function WorkshopTab() {
     }, 700)
   }
 
-  /** 触发一个下载：静态模式（直连 CDN）｜网页自选目录直写 > 隐藏 iframe 导航 */
+  /** 触发一个下载：静态模式（直连 CDN）｜网页自选目录直写 > 隐藏 iframe 导航。
+   *  全部路径统一写 localStorage 镜像（v1.3.3）：与 SQLite / JSON 档案互为备份 */
   const triggerDownload = (w: ZhefengWallpaper) => {
     // 静态模式（GitHub Pages 等纯前端托管）：直连 CDN 取图 → 画布转 JPG → 自选目录 / 浏览器另存
+    // （prepareWallpaperBlob 内部已写 localStorage）
     if (mode === "static") {
       void (async () => {
         try {
@@ -441,6 +499,8 @@ export function WorkshopTab() {
       })()
       return
     }
+    // 服务器模式：镜像到 localStorage（SQLite / JSON 档案由服务端接口落）
+    mirrorDownloadRecord(w)
     const dir = webDirRef.current
     if (dir && !getDesktopApp()) {
       void (async () => {
@@ -558,8 +618,10 @@ export function WorkshopTab() {
     if (hideDownloaded) setTimeout(() => setReloadNonce((n) => n + 1), 8000)
   }
 
-  /** 单张下载：乐观移除（hideDownloaded 开启时），并同步移出右侧已选清单（避免重复下载） */
+  /** 单张下载：乐观移除（hideDownloaded 开启时），并同步移出右侧已选清单（避免重复下载）。
+   *  同时写 localStorage 镜像（卡片锚点直下载路径不经 triggerDownload） */
   const onDownloadOne = (w: ZhefengWallpaper) => {
+    if (mode !== "static") mirrorDownloadRecord(w)
     toast.success(`开始下载「${w.title}」，下载过的壁纸之后不再显示`)
     // 右侧已选面板同步刷新：已下载的壁纸不再留在清单里
     setSelected((prev) => prev.filter((p) => p.id !== w.id))
@@ -858,9 +920,11 @@ export function WorkshopTab() {
           </div>
         ) : (
           <div className={cn("grid gap-3", isPhone ? "grid-cols-2 @sm:grid-cols-3 @xl:grid-cols-4 @3xl:grid-cols-5 @5xl:grid-cols-6" : "grid-cols-1 @sm:grid-cols-2 @2xl:grid-cols-3 @4xl:grid-cols-4")}>
-            {list.items.map((w) => {
+            {list.items.map((w, idx) => {
               const order = selected.findIndex((p) => p.id === w.id)
               const isSelected = order >= 0
+              // 首屏（视口内）图片：立即可加载 + 高优先级；其余保持懒加载（v1.3.3 提速）
+              const eager = idx < (isPhone ? 12 : 8)
               return (
                 <motion.button
                   key={w.id}
@@ -880,14 +944,20 @@ export function WorkshopTab() {
                       : "border-transparent shadow-sm hover:-translate-y-1 hover:shadow-lg"
                   )}
                 >
+                  {/* 加载微光：图片未到时呼吸提示（有限次自停，不空耗 CPU） */}
+                  <span
+                    aria-hidden
+                    className="absolute inset-0 animate-pulse bg-muted [animation-iteration-count:6]"
+                  />
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={w.thumb}
                     alt={`壁纸 ${w.title}`}
-                    loading="lazy"
+                    loading={eager ? "eager" : "lazy"}
+                    fetchPriority={eager ? "high" : "auto"}
                     decoding="async"
                     onError={imgFallback(w.src)}
-                    className="size-full bg-muted object-cover transition-transform duration-300 group-hover:scale-105"
+                    className="relative size-full bg-muted object-cover transition-transform duration-300 group-hover:scale-105"
                   />
 
                   {/* 分辨率徽标 */}
@@ -1097,6 +1167,8 @@ function WallpaperPreviewDialog({
                 key={wallpaper.id}
                 src={wallpaper.src}
                 alt={`壁纸 ${wallpaper.title}`}
+                fetchPriority="high"
+                decoding="async"
                 onLoad={onImgLoaded}
                 onError={(e) => {
                   // 首次失败追加 r=1 破缓存重试一次；重试仍失败才结束 loading 态

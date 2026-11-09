@@ -43,11 +43,13 @@ export function PwaProvider() {
     window.addEventListener("beforeinstallprompt", onBeforeInstall)
     window.addEventListener("appinstalled", onInstalled)
 
-    // 3) 注册 Service Worker（不支持 / 非安全环境 / Electron 桌面版时静默跳过）
-    //    Electron 桌面版：本地服务器随应用运行，离线缓存无意义且可能造成陈旧页面
+    // 3) 注册 Service Worker（不支持 / 非安全环境时静默跳过）
+    //    v1.3.3 起 Electron 桌面版同样注册：127.0.0.1 是安全上下文，
+    //    导航与构建产物均「网络优先」不存在陈旧页面问题；而哲风 CDN 图片
+    //    的持久缓存（ww-img-cdn）能让已看过的壁纸秒开、跨版本不清空 ——
+    //    这是桌面版图片显示提速的关键一环。
     //    子路径托管（如 GitHub Pages /bizhi）时 sw.js 与 scope 同步加前缀
-    const isDesktopApp = Boolean((window as unknown as { desktopApp?: unknown }).desktopApp)
-    if (!isDesktopApp && "serviceWorker" in navigator) {
+    if ("serviceWorker" in navigator) {
       const register = () => {
         navigator.serviceWorker
           .register(`${BASE_PATH}/sw.js`, { scope: `${BASE_PATH}/` })

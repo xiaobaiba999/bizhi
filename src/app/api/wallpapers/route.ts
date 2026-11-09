@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { fetchWallpapers, findCategory, PAGE_SIZE, ZHEFENG_CATEGORIES } from "@/lib/zhefeng"
+import { ensureArchiveMerged } from "@/lib/download-archive"
 
 
 /**
@@ -15,6 +16,9 @@ export async function GET(req: NextRequest) {
     req.nextUrl.searchParams.get("hideDownloaded") === "0" ? false : true
 
   try {
+    // 先做一次「档案 → 数据库」懒合并（进程内仅一次）：数据库被版本升级
+    // 重建/清空时，从 downloads.json 档案整表还原下载记录，保证过滤立即生效
+    await ensureArchiveMerged()
     const cat = findCategory(catKey)
 
     if (!hideDownloaded) {
