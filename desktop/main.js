@@ -6,10 +6,13 @@
  * 职责：
  * 1. 以子进程方式内嵌运行 Next.js standalone 服务器（ELECTRON_RUN_AS_NODE）
  * 2. 首次运行时把安装包内置的空数据库模板复制到用户数据目录（%APPDATA%\壁纸工坊）
- * 3. 接住网页触发的壁纸下载，自动保存到系统「下载\壁纸工坊」目录（不弹保存框）
- * 4. 外部链接一律交给系统浏览器
- * 5. 卸载说明：安装目录由 NSIS 卸载器清理；用户数据目录（下载记录数据库、
- *    设置）永久保留（v1.3.2 起不再随卸载删除）→ 重装后自动恢复已下载记录
+ *    —— 已存在的数据库只要是有效 SQLite 文件就原样保留，永不因缺表/缺列重建
+ *    （缺表缺列由服务端启动时自动修补，见 src/instrumentation.ts）
+ * 3. 启动时自恢复「升级护送」的用户数据（安装器崩溃/中断时的兑底，见 build/installer.nsh）
+ * 4. 接住网页触发的壁纸下载，自动保存到系统「下载\壁纸工坊」目录（不弹保存框）
+ * 5. 外部链接一律交给系统浏览器
+ * 6. 卸载说明：安装目录由 NSIS 卸载器清理；用户数据目录（数据库/屏蔽记录）
+ *    仅在卸载向导中主动勾选「同时删除应用数据」时才删除 → 正常卸载不丢数据
  */
 
 const { app, BrowserWindow, Menu, shell, session, dialog, Notification, ipcMain } = require("electron");
@@ -56,7 +59,7 @@ function serverDir() {
   return path.join(process.resourcesPath, "app", "server");
 }
 
-/** 用户数据目录（Windows: %APPDATA%\壁纸工坊；卸载不删除 → 下载记录跨安装永久保留） */
+/** 用户数据目录（Windows: %APPDATA%\壁纸工坊，卸载时由安装器清理） */
 function dataDir() {
   return process.env.WF_DATA_DIR || app.getPath("userData");
 }
@@ -91,28 +94,78 @@ function chosenDownloadDir() {
 }
 
 /**
- * 当前应用所需的数据库表（与 prisma/schema.prisma 保持一致）。
- * 用于升级校验：旧版本数据库缺表时，新版 Prisma 会在运行时报错，
- * 表现为「安装了新版本打不开、必须完整卸载（清掉用户数据）才能用」。
- * —— 启动时检测到结构不符就自动备份旧库并重建，彻底消除该症状。
+ * 恢复「升级护送」的用户数据（兜底）：新安装器升级时会把用户数据目录改名转移到
+ * 壁纸工坊.wf-upgrade-backup，旧版卸载完成后再放回；被中断遗留的副本停放于
+ * 壁纸工坊.wf-upgrade-parked。这里在应用启动时自动处置 —— 无论中间出了什么
+ * 状况（安装器崩溃 / 用户取消安装），数据都不会丢：
+ *  - 数据目录缺失或仅空壳库（体积 ≤ 空模板）→ 恢复护送副本；
+ *  - 现库已有真实数据（体积超过空模板）→ 副本视为陈旧残留，清理。
  */
-const REQUIRED_DB_TABLES = ["ZfToken", "Download"];
-
-/** SQLite 文件中表名以明文形式存在于 sqlite_master 的建表语句里；
- *  用「原始字节包含表名」做一次轻量结构校验（无需 sqlite 驱动） */
-function dbHasAllTables(dbFile) {
+function restoreEscortedData() {
   try {
-    const head = fs.readFileSync(dbFile);
-    const text = head.toString("latin1");
-    return REQUIRED_DB_TABLES.every((t) => text.includes(`TABLE ${t}`) || text.includes(`TABLE\`${t}\``) || text.includes(`TABLE "${t}"`));
+    const dir = dataDir();
+    const dbInDir = path.join(dir, "wallpaper.db");
+    const template = IS_DEV
+      ? path.join(__dirname, "..", "release", "resources", "empty.db")
+      : path.join(process.resourcesPath, "app", "empty.db");
+    // 空模板库的体积基线：现库超过它即视为有真实数据（SQLite 按页增长）
+    const freshLimit = fs.existsSync(template) ? fs.statSync(template).size : 40960;
+    const dirHasRealData =
+      fs.existsSync(dbInDir) && fs.statSync(dbInDir).size > freshLimit;
+
+    for (const suffix of [".wf-upgrade-backup", ".wf-upgrade-parked"]) {
+      const candidate = dir + suffix;
+      const dbInCandidate = path.join(candidate, "wallpaper.db");
+      if (!fs.existsSync(dbInCandidate)) continue;
+
+      if (!fs.existsSync(dbInDir) || !dirHasRealData) {
+        // 数据目录缺失 / 仅空壳库 → 恢复护送副本
+        if (fs.existsSync(dir)) {
+          // 空壳目录挪走，护送副本归位
+          const hollow = dir + ".hollow-" + Date.now();
+          fs.renameSync(dir, hollow);
+          fs.renameSync(candidate, dir);
+          fs.rmSync(hollow, { recursive: true, force: true });
+        } else {
+          fs.renameSync(candidate, dir);
+        }
+        console.log("[desktop] 升级护送的用户数据已恢复:", dir);
+        return;
+      }
+
+      // 现库有真实数据 → 副本为陈旧残留，清理
+      fs.rmSync(candidate, { recursive: true, force: true });
+      console.log("[desktop] 清理陈旧护送残留:", candidate);
+    }
+  } catch (e) {
+    console.error("[desktop] 恢复护送数据失败:", e);
+  }
+}
+
+/** SQLite 文件头魔数（前 16 字节）：有效即保留，绝不因缺表/缺列重建 */
+const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "latin1");
+
+function isValidSqlite(dbFile) {
+  try {
+    const fd = fs.openSync(dbFile, "r");
+    try {
+      const head = Buffer.alloc(16);
+      const n = fs.readSync(fd, head, 0, 16, 0);
+      return n === 16 && head.equals(SQLITE_MAGIC);
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return false;
   }
 }
 
-/** 首次运行：复制安装包内置的空数据库模板（已含全部表结构）。
- *  升级运行：旧库结构与新版本不符（缺表）时，备份旧库后重建模板，
- *  避免新版 Prisma 读旧库报错导致「升级即白屏、卸载重装才恢复」 */
+/**
+ * 首次运行：复制安装包内置的空数据库模板（已含全部表结构）。
+ * 升级运行：数据库文件只要是有效 SQLite 就原样保留 —— 缺表/缺列由服务端
+ * 启动时自动修补（instrumentation），旧记录一条不丢；
+ * 仅真正损坏（非 SQLite 文件）时备份后重建。
+ */
 function ensureDatabase() {
   const dir = dataDir();
   dbPath = path.join(dir, "wallpaper.db");
@@ -124,14 +177,14 @@ function ensureDatabase() {
   fs.mkdirSync(dir, { recursive: true });
 
   if (fs.existsSync(dbPath)) {
-    if (dbHasAllTables(dbPath)) return dbPath;
-    // 结构不符（旧版本库 / 损坏库）：备份后重建
+    if (isValidSqlite(dbPath)) return dbPath; // 有效 → 永不重建（结构问题交给服务端自动修补）
+    // 真正损坏（非 SQLite 文件）：备份后重建
     const backup = path.join(dir, `wallpaper.db.bak-${Date.now()}`);
     try {
       fs.copyFileSync(dbPath, backup);
-      console.log(`[desktop] 数据库结构已升级，旧库备份至 ${backup}`);
+      console.log(`[desktop] 数据库文件损坏，旧文件备份至 ${backup}`);
     } catch (e) {
-      console.error("[desktop] 备份旧数据库失败（将继续重建）:", e);
+      console.error("[desktop] 备份损坏数据库失败（将继续重建）:", e);
     }
     try {
       fs.rmSync(dbPath, { force: true });
@@ -139,7 +192,7 @@ function ensureDatabase() {
       fs.rmSync(path.join(dir, "wallpaper.db-wal"), { force: true });
       fs.rmSync(path.join(dir, "wallpaper.db-shm"), { force: true });
     } catch (e) {
-      console.error("[desktop] 清理旧数据库文件失败:", e);
+      console.error("[desktop] 清理损坏数据库文件失败:", e);
     }
   }
 
@@ -495,6 +548,7 @@ if (!gotLock) {
     setupIpc();
 
     try {
+      restoreEscortedData();
       ensureDatabase();
       currentPort = await pickPort(DEFAULT_PORT);
       startServer(currentPort);

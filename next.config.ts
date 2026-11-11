@@ -5,7 +5,7 @@ import type { NextConfig } from "next";
  * - 默认（dev / 沙箱）：常规 dev 服务器，含 /api/* 路由
  * - NEXT_OUTPUT_STANDALONE=1：桌面版（Electron 内嵌 standalone 服务器）
  * - NEXT_OUTPUT_EXPORT=1：纯静态导出（GitHub Pages 等静态托管，无 API；
- *   构建时由 scripts/build-gh-pages.mjs 临时移走 src/app/api）
+ *   构建时由 scripts/build-gh-pages.mjs 临时移走 src/app/api 与 src/instrumentation.ts）
  *   GH_BASE_PATH：静态托管子路径（如项目页 /repo-name），用户根仓库
  *   （username.github.io）留空即可
  */
@@ -23,28 +23,24 @@ const nextConfig: NextConfig = {
     "preview-chat-32cc72a7-069a-47a8-ad85-fc25d9ccc148.space.zhipuaidemo.cn",
   ],
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  // sharp（下载统一转存 JPG）为原生模块：必须外部化，禁止被打进路由包
-  serverExternalPackages: ["sharp"],
   ...(isExportBuild
     ? {
         output: "export" as const,
         images: { unoptimized: true },
         basePath: process.env.GH_BASE_PATH || undefined,
-        // 子路径注入到客户端包（SW 注册 / 模式探测 / exe 下载链接等用）
-        env: { NEXT_PUBLIC_BASE_PATH: process.env.GH_BASE_PATH || "" },
+        // 子路径与静态模式标记注入客户端包（图片直连 / SW 注册 / 模式判定等用）
+        env: {
+          NEXT_PUBLIC_BASE_PATH: process.env.GH_BASE_PATH || "",
+          NEXT_PUBLIC_STATIC_EXPORT: "1",
+        },
       }
     : {}),
   ...(isDesktopBuild
     ? {
         output: "standalone" as const,
-        // Prisma / sharp 原生二进制需显式纳入 standalone 追踪
-        //（@img/** 同时覆盖 linux 本地冒烟与 win32 桌面安装包两套平台二进制）
+        // Prisma 原生引擎（.node 二进制）需显式纳入 standalone 追踪
         outputFileTracingIncludes: {
-          "/**": [
-            "./node_modules/.prisma/client/**",
-            "./node_modules/sharp/**",
-            "./node_modules/@img/**",
-          ],
+          "/**": ["./node_modules/.prisma/client/**"],
         },
       }
     : {}),

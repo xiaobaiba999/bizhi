@@ -9,7 +9,8 @@
  * 产物：github-pages-dist/（完整静态站点，含 .nojekyll）
  *
  * 原理：
- * 1. 临时移走 src/app/api（output: 'export' 不支持路由处理器）
+ * 1. 临时移走 src/app/api（output: 'export' 不支持路由处理器）与
+ *    src/instrumentation.ts（服务器启动钩子，动态引入 Prisma，静态包不应带）
  * 2. 以 NEXT_OUTPUT_EXPORT=1 + 独立 distDir 构建（不影响 dev:3000 的 .next）
  * 3. 找到导出目录（out / <distDir>/export / <distDir>）→ 拷到 github-pages-dist
  * 4. 无论成败都恢复 api 目录（finally）
@@ -29,6 +30,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const APP_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 const API_DIR = path.join(ROOT, "src", "app", "api");
 const API_STASH = path.join(ROOT, ".api-stash");
+/** instrumentation.ts：服务器启动钩子（Prisma 动态引入 + SQLite 修补），静态包不应包含 */
+const INSTR_FILE = path.join(ROOT, "src", "instrumentation.ts");
+const INSTR_STASH = path.join(ROOT, ".instrumentation-stash.ts");
 /** 桌面安装包不入静态站点（173MB 超 GitHub 单文件 100MB 限制，也无意义） */
 const DESKTOP_DIR = path.join(ROOT, "public", "desktop");
 const DESKTOP_STASH = path.join(ROOT, ".desktop-stash");
@@ -86,15 +90,16 @@ function patchTsconfigForExport() {
   const TSCONFIG = path.join(ROOT, "tsconfig.json");
   const raw = fs.readFileSync(TSCONFIG, "utf8");
   const json = JSON.parse(raw);
-  const extra = [".next", ".next-desktop", ".gh-pages-build", "out", ".api-stash"];
+  const extra = [".next", ".next-desktop", ".gh-pages-build", "out", ".api-stash", ".instrumentation-stash.ts"];
   const exclude = new Set([...(json.exclude ?? []), ...extra]);
   json.exclude = [...exclude];
   fs.writeFileSync(TSCONFIG, JSON.stringify(json, null, 2) + "\n");
   return raw; // 原文返回，构建后恢复
 }
 
-step("① 移走 src/app/api（静态导出不支持路由处理器）、public/desktop（安装包）与 public/*.zip（避免递归嵌套）");
+step("① 移走 src/app/api 与 src/instrumentation.ts（静态导出不支持路由处理器 / 服务器钩子）、public/desktop（安装包）与 public/*.zip（避免递归嵌套）");
 moveDir(API_DIR, API_STASH);
+if (fs.existsSync(INSTR_FILE)) fs.renameSync(INSTR_FILE, INSTR_STASH);
 if (fs.existsSync(DESKTOP_DIR)) moveDir(DESKTOP_DIR, DESKTOP_STASH);
 fs.mkdirSync(ZIP_STASH, { recursive: true });
 const zippedBack = [];
@@ -161,8 +166,8 @@ try {
 
 见仓库 **[Releases](https://github.com/xiaobaiba999/bizhi/releases)**：
 
-- \`WallpaperWorkshop-Setup-v${APP_VERSION}.exe\`（约 174MB）—— Windows 桌面安装版，
-  下载记录永久保存在用户数据目录（卸载重装自动恢复）
+- \`WallpaperWorkshop-Setup-v${APP_VERSION}.exe\`（约 167MB）—— Windows 桌面安装版，
+  下载记录 / 屏蔽记录永久保存在用户数据目录（升级重装都自动护送恢复）
 - \`WallpaperWorkshop-Web-v${APP_VERSION}.zip\`（约 0.9MB）—— 本静态网页版的离线压缩包
 
 ## 仓库结构
@@ -227,10 +232,14 @@ try {
 ${basePath ? `  注意：本项目以子路径 ${basePath} 托管构建，仓库须同名或 Pages 地址一致` : "  提示：仓库命名为 <用户名>.github.io 可从根路径访问，效果最佳"}
 `);
 } finally {
-  step("④ 恢复 src/app/api、public/desktop、public/*.zip 与 tsconfig.json");
+  step("④ 恢复 src/app/api、src/instrumentation.ts、public/desktop、public/*.zip 与 tsconfig.json");
   if (fs.existsSync(API_STASH)) {
     fs.rmSync(API_DIR, { recursive: true, force: true });
     fs.renameSync(API_STASH, API_DIR);
+  }
+  if (fs.existsSync(INSTR_STASH)) {
+    fs.rmSync(INSTR_FILE, { force: true });
+    fs.renameSync(INSTR_STASH, INSTR_FILE);
   }
   if (fs.existsSync(DESKTOP_STASH)) {
     fs.rmSync(DESKTOP_DIR, { recursive: true, force: true });

@@ -25,11 +25,6 @@ const eslintConfig = defineConfig([
     "desktop/**",
     "public/desktop/**",
     "tool-results/**",
-    // GitHub Pages 静态导出产物与构建暂存目录
-    "github-pages-dist/**",
-    ".gh-pages-build/**",
-    ".api-stash/**",
-    ".desktop-stash/**",
   ]),
   {
     rules: {

@@ -105,19 +105,14 @@ function assemble() {
   fs.cpSync(path.join(DIST, "static"), path.join(SERVER_OUT, ".next-desktop", "static"), {
     recursive: true,
   });
-  // public 静态资源（排除 desktop/ —— 桌面版无需内嵌自己的安装包，避免 167MB 递归膨胀；
-  // 排除 *.zip —— 网页版分发包只经 dev 服务器 / download 目录分发，无需打进 exe）
+  // public 静态资源（排除 desktop/ —— 桌面版无需内嵌自己的安装包，避免 167MB 递归膨胀）
   if (fs.existsSync(path.join(ROOT, "public"))) {
     const publicSrc = path.join(ROOT, "public");
     fs.cpSync(publicSrc, path.join(SERVER_OUT, "public"), {
       recursive: true,
       filter: (src) => {
         const rel = path.relative(publicSrc, src);
-        return !(
-          rel === "desktop" ||
-          rel.startsWith("desktop" + path.sep) ||
-          rel.endsWith(".zip")
-        );
+        return !(rel === "desktop" || rel.startsWith("desktop" + path.sep));
       },
     });
   }
@@ -141,34 +136,6 @@ function assemble() {
     fs
       .readdirSync(destClient)
       .filter((f) => f.includes("engine"))
-      .join(", ")
-  );
-
-  // 确保 sharp（JPG 统一转存）双平台二进制在服务器 node_modules 内：
-  // 追踪可能只带 Linux 侧 —— win32 由安装包在 Windows 上运行，必须补齐
-  const srcImg = path.join(ROOT, "node_modules", "@img");
-  const destImg = path.join(SERVER_OUT, "node_modules", "@img");
-  fs.mkdirSync(destImg, { recursive: true });
-  for (const pkg of ["sharp-linux-x64", "sharp-libvips-linux-x64", "sharp-win32-x64"]) {
-    const from = path.join(srcImg, pkg);
-    const to = path.join(destImg, pkg);
-    if (!fs.existsSync(from)) {
-      console.warn(`[desktop-build] 警告: node_modules/@img/${pkg} 缺失，JPG 转换在对应平台可能不可用`);
-      continue;
-    }
-    if (!fs.existsSync(to)) fs.cpSync(from, to, { recursive: true });
-  }
-  // sharp 主包（追踪未带时补齐）
-  const destSharp = path.join(SERVER_OUT, "node_modules", "sharp");
-  if (!fs.existsSync(destSharp)) {
-    fs.cpSync(path.join(ROOT, "node_modules", "sharp"), destSharp, { recursive: true });
-    console.log("[desktop-build] sharp 主包已补入服务器 node_modules");
-  }
-  console.log(
-    "  sharp 平台二进制:",
-    fs
-      .readdirSync(destImg)
-      .filter((f) => f.startsWith("sharp-"))
       .join(", ")
   );
 

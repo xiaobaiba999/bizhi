@@ -17,9 +17,6 @@
 /.next/
 /out/
 
-# production
-/build
-
 # misc
 .DS_Store
 *.pem
@@ -40,17 +37,26 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# 桌面版打包产物
+# 桌面版打包产物（安装包不进 git：GitHub 单文件 100MB 硬限制）
 /.next-desktop/
 /release/
 /public/desktop/
+/download/*.exe
 
-# GitHub Pages 静态导出产物与构建暂存目录（不入库）
-/github-pages-dist/
+# GitHub Pages 静态导出产物与构建临时目录（由 scripts/build-gh-pages.mjs 生成/恢复）
 /.gh-pages-build/
+/github-pages-dist/
 /.api-stash/
 /.desktop-stash/
+/.zip-stash/
+/.instrumentation-stash.ts
 /public/*.zip
 
-# 下载记录 JSON 档案（运行时产物，桌面版位于用户数据目录）
-/db/downloads.json
+# 静态版本地验证服务器（一次性测试工具）
+/mini-gh-pages-test/
+
+# 本地运行数据与日志（含登录令牌等敏感数据，绝不入库）
+/db/
+/dev.log
+/build-desktop.log
+/upload/

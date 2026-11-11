@@ -23,7 +23,6 @@ function useIsDesktopApp() {
  */
 export function InstallAppButton({ className }: { className?: string }) {
   const deferredPrompt = usePwaStore((s) => s.deferredPrompt)
-  const setDeferredPrompt = usePwaStore((s) => s.setDeferredPrompt)
   const standalone = usePwaStore((s) => s.standalone)
   const setDialogOpen = usePwaStore((s) => s.setDialogOpen)
   const [busy, setBusy] = useState(false)
@@ -40,9 +39,7 @@ export function InstallAppButton({ className }: { className?: string }) {
         if (outcome === "accepted") toast.success("正在安装「壁纸工坊」…")
         else toast.info("已取消安装，之后可随时再点「安装应用」")
       } catch {
-        // 原生安装唤起失败（无用户手势 / 受限环境）：作废该事件并回落到安装说明弹窗
-        setDeferredPrompt(null)
-        setDialogOpen(true)
+        // 静默：回落到说明弹窗
       }
       setBusy(false)
       return

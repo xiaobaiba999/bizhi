@@ -32,49 +32,20 @@ export interface ZhefengCategory {
   name: string
   typeId: string
   wpType: 1 | 2
-  /**
-   * 源站 2026-10 改版：手机壁纸从 homeView?wpType=2（已 502）迁到独立的 /mobileView 页面。
-   * homeView = 电脑壁纸；mobileView = 手机壁纸（卡片 DOM 与详情链接均不同）。
-   */
-  endpoint: "homeView" | "mobileView"
 }
 
-/**
- * 分类导航（与源站一致：电脑壁纸 / 手机壁纸两大顶栏）。
- * 历史下线记录：「程序·代码」（源站返回空）；「推荐」混合位（v1.2.7）；
- * 「魅力·迷人 / 自制·艺术 / 安逸·自由 / 科幻·星云 / 动漫·二次元」（v1.2.9）；
- * 「自然·风景 / 游戏·玩具」（v1.2.10）——至此电脑壁纸下不再有任何子分类，
- * 电脑壁纸 = homeView 默认混合信息流（不带 typeId），手机壁纸 = mobileView 信息流。
- */
+/** 分类导航：仅保留 电脑壁纸 / 手机壁纸 两类（wpType 决定源站返回的壁纸类型） */
 export const ZHEFENG_CATEGORIES: ZhefengCategory[] = [
-  // —— 电脑壁纸（/homeView 默认混合信息流）——
-  { key: "desktop", name: "电脑壁纸", typeId: "", wpType: 1, endpoint: "homeView" },
-  // —— 手机壁纸（/mobileView，竖版）——
-  { key: "phone", name: "手机壁纸", typeId: "", wpType: 2, endpoint: "mobileView" },
+  { key: "desktop", name: "电脑壁纸", typeId: "", wpType: 1 },
+  { key: "phone", name: "手机壁纸", typeId: "", wpType: 2 },
 ]
 
 export function findCategory(key: string): ZhefengCategory {
   return ZHEFENG_CATEGORIES.find((c) => c.key === key) ?? ZHEFENG_CATEGORIES[0]
 }
 
-/** 每页张数（homeView 固定 12；mobileView 约 13 —— 取 12 作补抓阈值即可） */
+/** 每页张数（源站固定返回 12） */
 export const PAGE_SIZE = 12
-
-/**
- * 动态壁纸判定（剔除策略）：
- * 卡片内含视频（<video> 标签 / video_reduce_file 直链 / .mp4 .webm .mov）
- * 或动图（.gif）一律不收录 —— 本应用只提供静态壁纸，
- * 且存储时统一转存为 JPG（视频/动图无法也不应转存）。源站动态壁纸走
- * homeView?wpType=3 独立频道，本应用分类未引用；此处再作卡片级防御，
- * 保证任何混合列表也不会混进动态内容。
- */
-function isDynamicCard(chunk: string, src: string): boolean {
-  if (/<video[\s>]/i.test(chunk)) return true
-  if (/video_reduce_file/i.test(chunk)) return true
-  if (/\.(mp4|webm|mov|gif)(?:["'?&\s]|$)/i.test(chunk)) return true
-  if (/\.gif(?:["'?&\s]|$)/i.test(src)) return true
-  return false
-}
 
 /** 校验是否为哲风壁纸 CDN 图片直链 */
 export function isZhefengImageUrl(url: string): boolean {
@@ -87,18 +58,21 @@ export function isZhefengImageUrl(url: string): boolean {
 }
 
 /**
- * 哲风壁纸图片直连展示：页面全局 no-referrer 绕过 CDN 防盗链
- * （实测无 Referer → 200；携带第三方 Referer → 403），
- * 缩略变体缺失由前端 imgFallback 回退原图。此函数保留直链语义。
+ * 哲风壁纸图片展示链接：
+ * - 静态导出构建：CDN 直链（页面全局 no-referrer 绕过防盗链；CDN CORS 全开）
+ * - 服务器模式：走服务端代理（/api/wallpapers/img，绕过 CDN Referer 防盗链）
+ * 其他来源（本地素材 / dataURL）原样返回。
  */
 export function proxyImageUrl(src: string): string {
-  return src
+  if (process.env.NEXT_PUBLIC_STATIC_EXPORT === "1") return src
+  if (!isZhefengImageUrl(src)) return src
+  return `/api/wallpapers/img?src=${encodeURIComponent(src)}`
 }
 
 /**
- * <img> 加载失败自动回退原图直链（缩略变体 404 / 网络抖动）。
- * 页面全局 no-referrer（见 layout metadata.referrer），CDN 直连无防盗链问题；
- * 首次失败换原图，二次失败追加 r=1 破缓存重试一次。
+ * <img> 加载失败自动回退原图（缩略变体 404 / 网络抖动）。
+ * 首次失败换原图（两种模式都过 proxyImageUrl，静态直连 / 服务器代理各自正确）；
+ * 二次失败追加 r=1 破缓存重试一次。
  * 用法：onError={imgFallback(w.src)}
  */
 export function imgFallback(originalSrc: string) {
@@ -112,7 +86,7 @@ export function imgFallback(originalSrc: string) {
       return
     }
     el.dataset.wwOriginal = "1"
-    el.src = originalSrc
+    el.src = proxyImageUrl(originalSrc)
   }
 }
 
@@ -148,9 +122,6 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
     const src = imgMatch[1]
     const alt = imgMatch[2]
 
-    // 剔除动态壁纸（视频卡片 / 动图）
-    if (isDynamicCard(chunk, src)) continue
-
     // 图片 id（文件 id：下载记录的键，与图片直链一一对应）
     const dot = src.lastIndexOf(".")
     if (dot === -1) continue
@@ -164,10 +135,21 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
     const lookMatch = /href="\/homeViewLook\/([0-9]{6,32})"/.exec(chunk)
     const wtId = lookMatch ? lookMatch[1] : id
 
-    // 缩略图统一走 _s240q80.webp 变体（尺寸最小、CDN 覆盖率最高）。
-    // 注意：CDN 上部分图片的缩略变体并不存在（404），srcset 声明并不可信 ——
-    // 该场景由 /api/wallpapers/img 代理自动回落原图直链，无需在此判断。
-    const thumb = `${src.slice(0, dot)}_s240q80.webp`
+    // 缩略图：优先取 srcset 里实际存在的最大变体（s320 并非全量存在，s240 才有）
+    const srcsetMatch = /<img[^>]*srcset="([^"]+)"/.exec(chunk)
+    let thumb = ""
+    if (srcsetMatch) {
+      const variants = srcsetMatch[1]
+        .split(",")
+        .map((e) => e.trim().split(/\s+/))
+        .filter((p) => p.length === 2 && p[0] !== src && /^\/\d+$/.test(p[1]))
+      if (variants.length > 0) {
+        thumb = variants.reduce((a, b) =>
+          parseInt(b[1], 10) > parseInt(a[1], 10) ? b : a
+        )[0]
+      }
+    }
+    if (!thumb) thumb = `${src.slice(0, dot)}_s240q80.webp`
 
     // 标签
     const tagMatch = /<div class="labelDiv"[^>]*>([\s\S]*?)<\/div>/.exec(chunk)
@@ -191,70 +173,6 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
   return items
 }
 
-/* ------------------------------ 手机壁纸解析（/mobileView，源站 2026-10 改版后新结构） ------------------------------ */
-
-/**
- * /mobileView 卡片结构与 homeView 不同：
- * <a href="/mobileViewLook/<wtId>" class="mobile-virtual-card ...">
- *   <img srcset="..._s240q80.webp 160w, ....png 4096w"
- *        src="https://img.haowallpaper.com/cache_file/....png"
- *        alt="4k围巾壁纸 - 忧郁 - 手绘 - 清冷「哲风壁纸」">
- * </a>
- * —— 无 labelDiv 标签（从 alt「标题 - 标签1 - 标签2」拆出），无 s320 变体，
- *    详情链接为 /mobileViewLook/<id>（getCompleteUrl 同样用它）。
- */
-function parseMobileWallpapers(html: string): ZhefengWallpaper[] {
-  const items: ZhefengWallpaper[] = []
-  const seen = new Set<string>()
-
-  const cardRe = /<a\s+href="\/mobileViewLook\/([0-9]{6,32})"[^>]*>([\s\S]*?)<\/a>/g
-  for (const m of html.matchAll(cardRe)) {
-    const wtId = m[1]
-    const chunk = m[2]
-    if (!chunk.includes("img.haowallpaper.com")) continue
-
-    const imgMatch =
-      /<img[^>]*src="(https:\/\/img\.haowallpaper\.com\/cache_file\/[^"]+)"[^>]*alt="([^"]*)"/.exec(
-        chunk
-      )
-    if (!imgMatch) continue
-
-    const src = imgMatch[1] // 手机卡片 src 即原图直链（png 最大分辨率）
-    const alt = imgMatch[2]
-
-    // 剔除动态壁纸（视频卡片 / 动图）
-    if (isDynamicCard(chunk, src)) continue
-
-    const dot = src.lastIndexOf(".")
-    if (dot === -1) continue
-    const id = src.slice(src.lastIndexOf("/") + 1, dot)
-    if (seen.has(id)) continue
-    seen.add(id)
-
-    // 缩略图：手机卡片仅 s240q80.webp 一个缩略变体
-    const thumb = `${src.slice(0, dot)}_s240q80.webp`
-
-    // 标题与标签：手机卡片无 labelDiv，从 alt「标题 - 标签1 - 标签2」拆出
-    const parts = cleanTitle(alt)
-      .split(/\s*-\s*/)
-      .map((p) => p.trim())
-      .filter(Boolean)
-    const title = (parts.shift() ?? "").trim() || `壁纸 ${id.slice(-6)}`
-    const tags = parts.slice(0, 12)
-
-    items.push({
-      id,
-      wtId,
-      title,
-      resolution: parseResolution(alt),
-      src,
-      thumb,
-      tags,
-    })
-  }
-  return items
-}
-
 /* ------------------------------ 抓取 + 缓存 ------------------------------ */
 
 interface CacheEntry {
@@ -264,36 +182,6 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>()
 const CACHE_TTL = 10 * 60 * 1000
-
-/** 电脑壁纸（/homeView，typeId 子分类）一页 */
-async function fetchHomeView(cat: ZhefengCategory, page: number): Promise<ZhefengWallpaper[]> {
-  const params = new URLSearchParams({
-    page: String(page),
-    sortType: "3",
-    rows: "30",
-    wpType: String(cat.wpType),
-  })
-  if (cat.typeId) params.set("typeId", cat.typeId)
-
-  const res = await fetch(`${API_BASE}/homeView?${params.toString()}`, {
-    headers: { "User-Agent": UA, Referer: `${API_BASE}/` },
-    signal: AbortSignal.timeout(15000),
-    cache: "no-store",
-  })
-  if (!res.ok) throw new Error(`源站响应异常（HTTP ${res.status}）`)
-  return parseWallpapers(await res.text())
-}
-
-/** 手机壁纸（/mobileView，源站改版后独立页面，每页约 13 张）一页 */
-async function fetchMobileView(page: number): Promise<ZhefengWallpaper[]> {
-  const res = await fetch(`${API_BASE}/mobileView?page=${page}`, {
-    headers: { "User-Agent": UA, Referer: `${API_BASE}/` },
-    signal: AbortSignal.timeout(15000),
-    cache: "no-store",
-  })
-  if (!res.ok) throw new Error(`源站响应异常（HTTP ${res.status}）`)
-  return parseMobileWallpapers(await res.text())
-}
 
 /**
  * 抓取哲风壁纸某个分类的一页壁纸。
@@ -308,10 +196,23 @@ export async function fetchWallpapers(
   const hit = cache.get(key)
   if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.items
 
-  const items =
-    cat.endpoint === "mobileView"
-      ? await fetchMobileView(page)
-      : await fetchHomeView(cat, page)
+  const params = new URLSearchParams({
+    page: String(page),
+    sortType: "3",
+    rows: "30",
+    wpType: String(cat.wpType),
+  })
+  if (cat.typeId) params.set("typeId", cat.typeId)
+
+  const res = await fetch(`${API_BASE}/homeView?${params.toString()}`, {
+    headers: { "User-Agent": UA, Referer: `${API_BASE}/` },
+    signal: AbortSignal.timeout(15000),
+    cache: "no-store",
+  })
+  if (!res.ok) throw new Error(`源站响应异常（HTTP ${res.status}）`)
+
+  const html = await res.text()
+  const items = parseWallpapers(html)
   cache.set(key, { ts: Date.now(), items })
   return items
 }

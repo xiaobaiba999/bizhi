@@ -1,39 +1,44 @@
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
-import { fetchWallpapers, findCategory, PAGE_SIZE, ZHEFENG_CATEGORIES } from "@/lib/zhefeng"
-import { ensureArchiveMerged } from "@/lib/download-archive"
+import { fetchWallpapers, findCategory, PAGE_SIZE } from "@/lib/zhefeng"
 
 
 /**
  * GET /api/wallpapers?cat=<key>&page=<n>&hideDownloaded=1
  * 壁纸工坊主数据源：从哲风壁纸（haowallpaper.com）实时抓取。
- * hideDownloaded=1 时过滤掉已下载的壁纸，并自动向后补抓源站页面填满一页。
+ * 屏蔽过的壁纸永久过滤（不受 hideDownloaded 影响）；
+ * hideDownloaded=1 时再过滤掉已下载的壁纸，并自动向后补抓源站页面填满一页。
  */
 export async function GET(req: NextRequest) {
-  const catKey = req.nextUrl.searchParams.get("cat") ?? ZHEFENG_CATEGORIES[0].key
+  const catKey = req.nextUrl.searchParams.get("cat") ?? "recommend"
   const page = Math.max(1, Number(req.nextUrl.searchParams.get("page")) || 1)
   const hideDownloaded =
     req.nextUrl.searchParams.get("hideDownloaded") === "0" ? false : true
 
   try {
-    // 先做一次「档案 → 数据库」懒合并（进程内仅一次）：数据库被版本升级
-    // 重建/清空时，从 downloads.json 档案整表还原下载记录，保证过滤立即生效
-    await ensureArchiveMerged()
     const cat = findCategory(catKey)
+    const blockedCount = await db.blocked.count()
 
     if (!hideDownloaded) {
-      const items = await fetchWallpapers(cat, page)
+      // 显示已下载，但屏蔽过的仍然永久过滤
+      let items = await fetchWallpapers(cat, page)
+      const ids = items.map((w) => w.id)
+      if (ids.length) {
+        const blockedIds = new Set(
+          (await db.blocked.findMany({ where: { wtId: { in: ids } }, select: { wtId: true } })).map(
+            (b) => b.wtId
+          )
+        )
+        items = items.filter((w) => !blockedIds.has(w.id))
+      }
       const downloadedCount = await db.download.count()
       return NextResponse.json(
-        { category: cat.name, wpType: cat.wpType, page, pageSize: PAGE_SIZE, hasMore: items.length > 0, items, downloadedCount },
+        { category: cat.name, wpType: cat.wpType, page, pageSize: PAGE_SIZE, hasMore: items.length > 0, items, downloadedCount, blockedCount },
         { headers: { "Cache-Control": "no-store" } }
       )
     }
 
-    // 过滤已下载：从当前页向后最多多抓 3 页源站数据补齐
-    // 终点判定：只有源站返回空页才算「没有更多」——
-    // 手机壁纸每页 13 张且偶有 11/12 张（v1.3.0 前「页内 <12 即终点」的启发式
-    // 会在偶数短页上误判结束，导致手机壁纸只展示 40 多张就停止加载）
+    // 过滤已下载 + 已屏蔽：从当前页向后最多多抓 3 页源站数据补齐
     const MAX_LOOKAHEAD = 3
     let sourcePage = page
     let collected = 0
@@ -47,21 +52,25 @@ export async function GET(req: NextRequest) {
         sourceHasMore = false
         break
       }
+      if (batch.length < PAGE_SIZE) sourceHasMore = false
 
       const ids = batch.map((w) => w.id)
-      const downloaded = ids.length
-        ? new Set(
-            (
-              await db.download.findMany({
-                where: { wtId: { in: ids } },
-                select: { wtId: true },
-              })
-            ).map((d) => d.wtId)
-          )
-        : new Set<string>()
+      const excluded = new Set<string>()
+      if (ids.length) {
+        const rows = await db.download.findMany({
+          where: { wtId: { in: ids } },
+          select: { wtId: true },
+        })
+        for (const r of rows) excluded.add(r.wtId)
+        const blockedRows = await db.blocked.findMany({
+          where: { wtId: { in: ids } },
+          select: { wtId: true },
+        })
+        for (const r of blockedRows) excluded.add(r.wtId)
+      }
 
       for (const w of batch) {
-        if (downloaded.has(w.id)) {
+        if (excluded.has(w.id)) {
           hidden += 1
           continue
         }
@@ -84,6 +93,7 @@ export async function GET(req: NextRequest) {
         hasMore: sourceHasMore || collected >= PAGE_SIZE,
         hidden,
         downloadedCount,
+        blockedCount,
         items,
       },
       { headers: { "Cache-Control": "no-store" } }

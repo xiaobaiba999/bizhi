@@ -32,10 +32,9 @@ win:
       arch:
         - x64
 
-# NSIS 安装器：向导式安装；卸载只清安装目录（程序本体），
-# 用户数据目录（%APPDATA%\壁纸工坊：下载记录数据库、设置）永久保留 ——
-# 重装后自动恢复已下载记录（v1.3.2 起按产品约定不再随卸载删除）
-# include：覆盖安装自愈钩子（旧卸载器失败时自动清理残留并继续安装，见 build/installer.nsh）
+# NSIS 安装器：向导式安装；用户数据目录（数据库/屏蔽记录）仅在卸载向导中
+# 主动勾选「同时删除应用数据」时才删除（见 build/installer.nsh 的自定义卸载页）；
+# include：升级数据护送 + 覆盖安装自愈 + 外科清理兜底（见 build/installer.nsh）
 nsis:
   oneClick: false
   perMachine: false

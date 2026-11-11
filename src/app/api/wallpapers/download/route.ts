@@ -1,31 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import sharp from "sharp"
 import { db } from "@/lib/db"
 import { isZhefengImageUrl, upstreamHeaders } from "@/lib/zhefeng"
 import { zfCompleteUrl, zfUpstreamHeaders } from "@/lib/zf-login"
 import { ensureCertified, invalidateCertification } from "@/lib/zf-certify"
-import { syncArchiveAfterDownload } from "@/lib/download-archive"
-
-/** 存储统一格式：所有壁纸转存为 JPG（产品约定，动态内容已在抓取层剔除） */
-const STORE_EXT = "jpg"
-
-/**
- * 把上游图片字节统一转存为 JPG：
- * - PNG / WebP 透明区域衬白底（壁纸场景无透明需求）
- * - 质量 92、mozjpeg 编码（体积与观感的平衡点）
- * - 转换失败（意外格式等）返回 null，调用方回退原始字节流，保证下载不中断
- */
-async function toJpeg(buf: Buffer): Promise<Buffer | null> {
-  try {
-    return await sharp(buf, { failOn: "none", animated: false })
-      .flatten({ background: "#ffffff" })
-      .jpeg({ quality: 92, mozjpeg: true, chromaSubsampling: "4:2:0" })
-      .toBuffer()
-  } catch (e) {
-    console.warn("[download] JPG 转换失败，回退原始格式:", e)
-    return null
-  }
-}
 
 
 /** 清洗文件名：去掉 Windows / macOS 非法字符 */
@@ -39,7 +16,7 @@ function safeFilename(name: string): string {
   )
 }
 
-/** 从直链推断扩展名（仅作 JPG 转换失败时的回退后缀） */
+/** 从直链推断扩展名 */
 function extOf(src: string) {
   const dot = src.lastIndexOf(".")
   const e = dot === -1 ? "" : src.slice(dot + 1).toLowerCase()
@@ -119,10 +96,8 @@ async function fetchCompleteUrl(
  * GET /api/wallpapers/download?src=<img-url>&name=<文件名>&wtId=<壁纸详情id>
  *
  * - 本地已保存哲风令牌：先过官网 ALTCHA 人机验证，再走 getCompleteUrl
- *   拿「与官网完全一致」分辨率的原图直链并代理下载
+ *   拿「与官网完全一致」的原图直链并代理下载
  * - 无令牌 / 验证失败：直接代理直链（官网预览质量约 1100px）
- * - 存储统一转存为 JPG（白底展平 + 质量 92），文件名一律 .jpg；
- *   转换失败时回退原始格式，保证下载永不中断
  * - 无论哪种方式，都写入 Download 记录（下载过的图片不再显示）
  */
 export async function GET(req: NextRequest) {
@@ -134,28 +109,20 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "仅支持哲风壁纸图片直链" }, { status: 400 })
   }
 
-  const fallbackExt = extOf(src)
+  const ext = extOf(src)
+  const filename = `${safeFilename(name)}.${ext}`
   // wtId：壁纸详情 id（getCompleteUrl 用；旧版传文件 id 时回退）
   const fileId = fileIdOf(src) ?? ""
   const wtId = wtIdParam || fileId
 
-  // 记录下载（upsert：重复下载刷新时间与质量；键 = 文件 id，与列表过滤一致）。
-  // v1.3.3：同时同步到 JSON 档案（与数据库同目录），三层保险让记录跨版本永久保留
+  // 记录下载（upsert：重复下载刷新时间与质量；键 = 文件 id，与列表过滤一致）
   const recordDownload = async (quality: "preview" | "original") => {
     if (!fileId) return
     try {
-      const downloadedAt = new Date()
       await db.download.upsert({
         where: { wtId: fileId },
-        create: { wtId: fileId, title: safeFilename(name), src, quality, downloadedAt },
-        update: { quality, downloadedAt },
-      })
-      await syncArchiveAfterDownload({
-        wtId: fileId,
-        title: safeFilename(name),
-        src,
-        quality,
-        downloadedAt,
+        create: { wtId: fileId, title: safeFilename(name), src, quality },
+        update: { quality, downloadedAt: new Date() },
       })
     } catch (e) {
       console.error("record download error:", e)
@@ -209,7 +176,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ② 回源代理下载（整段读入后统一转存 JPG）
+    // ② 回源代理下载
     const upstream = await fetch(target, {
       headers: extraHeaders,
       signal: AbortSignal.timeout(60000),
@@ -224,25 +191,18 @@ export async function GET(req: NextRequest) {
 
     await recordDownload(quality)
 
-    // 统一转存 JPG；失败回退原始字节（后缀用源格式，避免名不副实）
-    const raw = Buffer.from(await upstream.arrayBuffer())
-    const jpg = await toJpeg(raw)
-    const out = jpg ?? raw
-    const ext = jpg ? STORE_EXT : fallbackExt
-    const filename = `${safeFilename(name)}.${ext}`
-
     const headers = new Headers()
-    headers.set("Content-Type", jpg ? "image/jpeg" : (upstream.headers.get("content-type") ?? "application/octet-stream"))
+    headers.set("Content-Type", upstream.headers.get("content-type") ?? "application/octet-stream")
     headers.set(
       "Content-Disposition",
       `attachment; filename="wallpaper.${ext}"; filename*=UTF-8''${encodeURIComponent(filename)}`
     )
     headers.set("X-Wallpaper-Quality", quality)
-    headers.set("X-Wallpaper-Format", ext)
     if (authExpired) headers.set("X-Auth-Expired", "1")
-    headers.set("Content-Length", String(out.length))
+    const len = upstream.headers.get("content-length")
+    if (len) headers.set("Content-Length", len)
 
-    return new NextResponse(new Uint8Array(out), { status: 200, headers })
+    return new NextResponse(upstream.body, { status: 200, headers })
   } catch (e) {
     console.error("GET /api/wallpapers/download error:", e)
     return NextResponse.json({ error: "原图下载失败，请稍后重试" }, { status: 502 })
