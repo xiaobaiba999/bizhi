@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { toast } from "sonner"
 import {
+  Ban,
   Check,
   Download,
   EyeOff,
@@ -31,6 +32,12 @@ import {
 } from "@/lib/desktop"
 import { TokenSettingsDialog } from "@/components/workshop/token-settings"
 import { SelectionPanel } from "@/components/workshop/selection-panel"
+import {
+  clearWebDownloadDir,
+  loadWebDownloadDir,
+  saveWebDownloadDir,
+  type FsDirHandleLike,
+} from "@/lib/web-download-dir"
 import {
   Dialog,
   DialogContent,
@@ -62,21 +69,7 @@ function downloadUrl(w: ZhefengWallpaper) {
 }
 
 /* ---------- 网页版自选保存目录（File System Access API，Chrome / Edge 支持） ---------- */
-
-/** 最小类型面：仅用到目录写入能力，避免依赖完整 FSA 类型定义 */
-interface FsWritable {
-  write(data: Blob): Promise<void>
-  close(): Promise<void>
-}
-interface FsFileHandle {
-  createWritable(): Promise<FsWritable>
-}
-interface FsDirHandle {
-  readonly name: string
-  getFileHandle(name: string, options?: { create?: boolean }): Promise<FsFileHandle>
-  queryPermission?(descriptor?: { mode?: "read" | "readwrite" }): Promise<PermissionState>
-  requestPermission?(descriptor?: { mode?: "read" | "readwrite" }): Promise<PermissionState>
-}
+/* 类型定义与 IndexedDB 持久化在 @/lib/web-download-dir（句柄跨会话/跨版本保留） */
 
 /** 当前浏览器是否支持自选本机目录 */
 function supportsDirectoryPicker(): boolean {
@@ -88,7 +81,7 @@ function supportsDirectoryPicker(): boolean {
 
 /** 目录选择结果：成功 / 用户取消 / 被环境拦截（iframe 嵌入、无用户激活等） */
 type PickDirResult =
-  | { kind: "ok"; dir: FsDirHandle }
+  | { kind: "ok"; dir: FsDirHandleLike }
   | { kind: "canceled" }
   | { kind: "blocked"; reason: string }
 
@@ -98,7 +91,7 @@ async function pickWebDirectory(): Promise<PickDirResult> {
   try {
     const picker = (
       window as unknown as {
-        showDirectoryPicker: (options?: { mode?: "read" | "readwrite" }) => Promise<FsDirHandle>
+        showDirectoryPicker: (options?: { mode?: "read" | "readwrite" }) => Promise<FsDirHandleLike>
       }
     ).showDirectoryPicker
     const dir = await picker({ mode: "readwrite" })
@@ -115,7 +108,7 @@ async function pickWebDirectory(): Promise<PickDirResult> {
 }
 
 /** 目录内重名自动追加序号：name (1).ext */
-async function uniqueFsName(dir: FsDirHandle, filename: string): Promise<string> {
+async function uniqueFsName(dir: FsDirHandleLike, filename: string): Promise<string> {
   const dot = filename.lastIndexOf(".")
   const stem = dot === -1 ? filename : filename.slice(0, dot)
   const ext = dot === -1 ? "" : filename.slice(dot)
@@ -132,7 +125,7 @@ async function uniqueFsName(dir: FsDirHandle, filename: string): Promise<string>
 }
 
 /** 经自选目录直写文件（成功 true；权限丢失 / 失败 false → 调用方回退浏览器下载） */
-async function saveToDirectory(dir: FsDirHandle, w: ZhefengWallpaper): Promise<boolean> {
+async function saveToDirectory(dir: FsDirHandleLike, w: ZhefengWallpaper): Promise<boolean> {
   try {
     if (dir.queryPermission) {
       const p = await dir.queryPermission({ mode: "readwrite" })
@@ -169,10 +162,11 @@ const DL_MENU_BTN =
 
 /**
  * 壁纸工坊主界面：壁纸数据实时来自哲风壁纸（haowallpaper.com）。
- * 分类切换 + 无限滚动 + 已下载自动隐藏 + 多选批量下载。
+ * 分类切换（电脑/手机）+ 无限滚动 + 已下载自动隐藏 + 屏蔽永久不再显示 + 多选批量下载；
+ * 网页版自选下载目录句柄持久化在 IndexedDB（跨会话/跨版本保留）。
  */
 export function WorkshopTab() {
-  const [catKey, setCatKey] = useState("recommend")
+  const [catKey, setCatKey] = useState("desktop")
   const [reloadNonce, setReloadNonce] = useState(0)
   const [list, setList] = useState<ListState>(INITIAL)
   const [selected, setSelected] = useState<ZhefengWallpaper[]>([])
@@ -184,6 +178,8 @@ export function WorkshopTab() {
   /** 下载过的图片不再显示（默认开启，可临时关闭查看） */
   const [hideDownloaded, setHideDownloaded] = useState(true)
   const [downloadedCount, setDownloadedCount] = useState(0)
+  /** 屏蔽记录数（屏蔽过的永久不再显示） */
+  const [blockedCount, setBlockedCount] = useState(0)
   /** 浏览器能力（挂载后判定，避免 SSR / hydration 不一致）：目录选择器支持 + 是否嵌入 iframe */
   const [pickerSupported, setPickerSupported] = useState(false)
   const [embeddedView, setEmbeddedView] = useState(false)
@@ -202,7 +198,9 @@ export function WorkshopTab() {
     timer: null,
   })
   /** 网页版自选目录句柄 + 直写完成提示防抖合并 */
-  const webDirRef = useRef<FsDirHandle | null>(null)
+  const webDirRef = useRef<FsDirHandleLike | null>(null)
+  /** IndexedDB 恢复但权限待申请的句柄（首次下载点击 = 用户手势时申请） */
+  const pendingWebDirRef = useRef<FsDirHandleLike | null>(null)
   const fsToastRef = useRef<{ count: number; lastAt: number; timer: ReturnType<typeof setTimeout> | null }>({
     count: 0,
     lastAt: 0,
@@ -216,6 +214,28 @@ export function WorkshopTab() {
       setEmbeddedView(window.self !== window.top)
     } catch {
       setEmbeddedView(true) // 跨域受限时同样按嵌入处理
+    }
+    // 恢复持久化的自选下载目录（IndexedDB）：换会话/换版本都还在
+    if (!getDesktopApp()) {
+      void (async () => {
+        const handle = await loadWebDownloadDir()
+        if (!handle) return
+        let granted = true
+        try {
+          if (handle.queryPermission) {
+            granted = (await handle.queryPermission({ mode: "readwrite" })) === "granted"
+          }
+        } catch {
+          granted = false
+        }
+        if (granted) {
+          webDirRef.current = handle
+          setWebDirName(handle.name)
+        } else {
+          // 权限为 prompt：浏览器禁止无手势弹窗 → 先挂起，首次下载时（用户手势）再申请
+          pendingWebDirRef.current = handle
+        }
+      })()
     }
   }, [])
 
@@ -285,8 +305,12 @@ export function WorkshopTab() {
         const msg = await res.json().catch(() => null)
         throw new Error(msg?.error ?? "抓取失败")
       }
-      const data: { items: ZhefengWallpaper[]; hasMore: boolean; downloadedCount?: number } =
-        await res.json()
+      const data: {
+        items: ZhefengWallpaper[]
+        hasMore: boolean
+        downloadedCount?: number
+        blockedCount?: number
+      } = await res.json()
       if (seq !== seqRef.current) return
 
       setList((s) => {
@@ -300,6 +324,7 @@ export function WorkshopTab() {
         }
       })
       if (typeof data.downloadedCount === "number") setDownloadedCount(data.downloadedCount)
+      if (typeof data.blockedCount === "number") setBlockedCount(data.blockedCount)
     } catch (e) {
       if (seq !== seqRef.current) return
       setList((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : "抓取失败" }))
@@ -321,8 +346,12 @@ export function WorkshopTab() {
           const msg = await res.json().catch(() => null)
           throw new Error(msg?.error ?? "抓取失败")
         }
-        const data: { items: ZhefengWallpaper[]; hasMore: boolean; downloadedCount?: number } =
-          await res.json()
+        const data: {
+          items: ZhefengWallpaper[]
+          hasMore: boolean
+          downloadedCount?: number
+          blockedCount?: number
+        } = await res.json()
         if (seq !== seqRef.current) return
         setList({
           items: data.items,
@@ -332,6 +361,7 @@ export function WorkshopTab() {
           error: null,
         })
         if (typeof data.downloadedCount === "number") setDownloadedCount(data.downloadedCount)
+        if (typeof data.blockedCount === "number") setBlockedCount(data.blockedCount)
       } catch (e) {
         if (seq !== seqRef.current) return
         setList({
@@ -400,23 +430,49 @@ export function WorkshopTab() {
     }, 700)
   }
 
-  /** 触发一个下载：网页自选目录直写 > 隐藏 iframe 导航（浏览器 / Electron 接管） */
+  /** 触发一个下载：网页自选目录直写 > 隐藏 iframe 导航（浏览器 / Electron 接管）。
+   *  恢复自 IndexedDB 但权限未决的句柄，借本次点击（用户手势）申请 */
   const triggerDownload = (w: ZhefengWallpaper) => {
-    const dir = webDirRef.current
-    if (dir && !getDesktopApp()) {
-      void (async () => {
-        if (await saveToDirectory(dir, w)) {
-          notifyFsSaved()
-        } else {
-          iframeDownload(w)
-          toast.info("本张改由浏览器下载（自选目录权限已失效），可在「下载位置」重新选择", {
-            duration: 5000,
-          })
-        }
-      })()
+    if (getDesktopApp()) {
+      iframeDownload(w)
       return
     }
-    iframeDownload(w)
+    void (async () => {
+      let dir = webDirRef.current ?? pendingWebDirRef.current
+      if (dir && !webDirRef.current) {
+        try {
+          const p = dir.queryPermission
+            ? await dir.queryPermission({ mode: "readwrite" })
+            : "granted"
+          if (
+            p === "granted" ||
+            (dir.requestPermission &&
+              (await dir.requestPermission({ mode: "readwrite" })) === "granted")
+          ) {
+            webDirRef.current = dir
+            setWebDirName(dir.name)
+          } else {
+            pendingWebDirRef.current = null
+            dir = null
+          }
+        } catch {
+          pendingWebDirRef.current = null
+          dir = null
+        }
+      }
+      if (dir) {
+        if (await saveToDirectory(dir, w)) {
+          notifyFsSaved()
+          return
+        }
+        iframeDownload(w)
+        toast.info("本张改由浏览器下载（自选目录权限已失效），可在「下载位置」重新选择", {
+          duration: 5000,
+        })
+        return
+      }
+      iframeDownload(w)
+    })()
   }
 
   /** 打开下载目录（桌面版调起磁盘文件管理器；网页版说明浏览器下载位置） */
@@ -473,10 +529,15 @@ export function WorkshopTab() {
       return
     }
     webDirRef.current = r.dir
+    pendingWebDirRef.current = null
     setWebDirName(r.dir.name)
+    // 持久化到 IndexedDB：关闭浏览器 / 重启 / 升级版本都记得住
+    const saved = await saveWebDownloadDir(r.dir)
     toast.success(`已选择保存位置：${r.dir.name}`, {
-      description: "之后下载的壁纸将直接保存到该文件夹（本次会话内有效）。",
-      duration: 6000,
+      description: saved
+        ? "已永久记住该位置（本机浏览器），下次打开自动恢复；点「改回默认」可取消。"
+        : "本次会话内有效（持久化失败）。",
+      duration: 7000,
     })
   }
 
@@ -493,9 +554,11 @@ export function WorkshopTab() {
       return
     }
     webDirRef.current = null
+    pendingWebDirRef.current = null
     setWebDirName(null)
+    await clearWebDownloadDir()
     toast.info("已改回浏览器默认下载", {
-      description: "壁纸将保存到浏览器「下载」文件夹。",
+      description: "壁纸将保存到浏览器「下载」文件夹，已清除记住的位置。",
       duration: 5000,
     })
   }
@@ -537,6 +600,45 @@ export function WorkshopTab() {
       setReloadNonce((n) => n + 1)
     } catch {
       toast.error("清空下载记录失败")
+    }
+  }
+
+  /** 屏蔽一张壁纸：永久不再显示（乐观移除 + 服务端入库，跨版本保留） */
+  const blockOne = (w: ZhefengWallpaper) => {
+    setList((s) => ({ ...s, items: s.items.filter((i) => i.id !== w.id) }))
+    setBlockedCount((n) => n + 1)
+    toast.success("已屏蔽，之后不再显示", {
+      description: `「${w.title}」已加入屏蔽记录，升级版本也永久保留`,
+      duration: 4500,
+    })
+    void (async () => {
+      try {
+        const res = await fetch("/api/wallpapers/block", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ src: w.src, title: w.title, wtId: w.wtId || w.id }),
+        })
+        if (!res.ok) throw new Error()
+        const data: { blockedCount?: number } = await res.json()
+        if (typeof data.blockedCount === "number") setBlockedCount(data.blockedCount)
+      } catch {
+        toast.error("屏蔽失败，请稍后重试")
+        setReloadNonce((n) => n + 1) // 让服务端真实状态回到界面
+      }
+    })()
+  }
+
+  /** 清空屏蔽记录（被屏蔽的壁纸重新显示） */
+  const clearBlocked = async () => {
+    try {
+      const res = await fetch("/api/wallpapers/block", { method: "DELETE" })
+      if (!res.ok) throw new Error()
+      const data: { blockedCount?: number } = await res.json().catch(() => ({}))
+      setBlockedCount(typeof data.blockedCount === "number" ? data.blockedCount : 0)
+      toast.success("屏蔽记录已清空，被屏蔽的壁纸恢复显示")
+      setReloadNonce((n) => n + 1)
+    } catch {
+      toast.error("清空屏蔽记录失败")
     }
   }
 
@@ -689,7 +791,7 @@ export function WorkshopTab() {
           >
             哲风壁纸
           </a>
-          ，下载原图，下载过的自动隐藏
+          ，下载原图；下载过的自动隐藏，屏蔽的永久不再出现
         </p>
       </div>
 
@@ -719,7 +821,7 @@ export function WorkshopTab() {
             ))}
           </div>
 
-          {/* 已下载过滤开关 */}
+          {/* 已下载过滤 + 屏蔽计数（容器内吸顶） */}
           <div className="flex shrink-0 flex-col items-end gap-0.5 pb-1">
             <button
               type="button"
@@ -744,6 +846,23 @@ export function WorkshopTab() {
               >
                 <Trash2 className="size-2.5" />
                 清空记录
+              </button>
+            )}
+            <span
+              title="屏蔽过的壁纸永久不再显示（升级版本也保留）"
+              className="inline-flex h-7 items-center gap-1.5 rounded-full border border-border px-2.5 text-[11px] font-semibold text-muted-foreground"
+            >
+              <Ban className="size-3" />
+              已屏蔽{blockedCount > 0 && `（${blockedCount}）`}
+            </span>
+            {blockedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void clearBlocked()}
+                className="inline-flex h-5.5 items-center gap-0.5 rounded-full px-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:text-destructive"
+              >
+                <Trash2 className="size-2.5" />
+                清空屏蔽
               </button>
             )}
           </div>
@@ -782,7 +901,9 @@ export function WorkshopTab() {
         ) : list.items.length === 0 ? (
           <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-center">
             <p className="text-sm text-muted-foreground">
-              {hideDownloaded && downloadedCount > 0 ? "这一页的壁纸都下载过了" : "这个分类暂时没有壁纸"}
+              {hideDownloaded && (downloadedCount > 0 || blockedCount > 0)
+                ? "这一页的壁纸都被过滤了（已下载或已屏蔽）"
+                : "这个分类暂时没有壁纸"}
             </p>
             {hideDownloaded && downloadedCount > 0 && (
               <button
@@ -883,6 +1004,19 @@ export function WorkshopTab() {
                     >
                       <Download className="size-3.5" />
                     </a>
+                    <span
+                      role="button"
+                      tabIndex={-1}
+                      aria-label={`屏蔽壁纸 ${w.title}`}
+                      title="屏蔽：以后永久不再显示"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        blockOne(w)
+                      }}
+                      className="flex size-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform hover:scale-110"
+                    >
+                      <Ban className="size-3.5" />
+                    </span>
                   </span>
                 </motion.button>
               )
@@ -988,12 +1122,16 @@ export function WorkshopTab() {
           onDownloadOne(w)
           setPreview(null)
         }}
+        onBlocked={(w) => {
+          blockOne(w)
+          setPreview(null)
+        }}
       />
     </section>
   )
 }
 
-/** 壁纸大图预览：原图查看 / 下载 / 选择 */
+/** 壁纸大图预览：原图查看 / 下载 / 选择 / 屏蔽 */
 function WallpaperPreviewDialog({
   wallpaper,
   imgLoading,
@@ -1001,6 +1139,7 @@ function WallpaperPreviewDialog({
   onClose,
   onToggle,
   onDownloaded,
+  onBlocked,
 }: {
   wallpaper: ZhefengWallpaper | null
   imgLoading: boolean
@@ -1008,6 +1147,7 @@ function WallpaperPreviewDialog({
   onClose: () => void
   onToggle: (w: ZhefengWallpaper) => void
   onDownloaded: (w: ZhefengWallpaper) => void
+  onBlocked: (w: ZhefengWallpaper) => void
 }) {
   return (
     <Dialog open={!!wallpaper} onOpenChange={(open) => !open && onClose()}>
@@ -1070,8 +1210,16 @@ function WallpaperPreviewDialog({
                   加入选择
                 </button>
               </div>
+              <button
+                type="button"
+                onClick={() => onBlocked(wallpaper)}
+                className="mt-2 inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-full border border-destructive/30 text-[11px] font-semibold text-destructive/90 transition-colors hover:bg-destructive/10 active:scale-95"
+              >
+                <Ban className="size-3" />
+                屏蔽这张壁纸（以后永久不再显示）
+              </button>
               <p className="mt-2.5 text-center text-[10px] text-muted-foreground">
-                已配置令牌时下载与官网分辨率、文件大小完全一致；下载过的壁纸之后不再显示
+                已配置令牌时下载与官网分辨率、文件大小完全一致；下载过的自动隐藏，屏蔽的永久不再出现
               </p>
             </div>
           </>

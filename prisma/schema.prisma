@@ -25,3 +25,12 @@ model Download {
   quality      String   @default("preview") // preview(预览质量) | original(令牌高清原图)
   downloadedAt DateTime @default(now())
 }
+
+// 屏蔽壁纸记录（屏蔽过的图片永久不再出现，跨版本保留在用户数据目录）
+model Blocked {
+  id        String   @id @default(cuid())
+  wtId      String   @unique // 哲风壁纸图片 id（CDN 文件名去扩展名，与列表过滤一致）
+  title     String
+  src       String
+  blockedAt DateTime @default(now())
+}

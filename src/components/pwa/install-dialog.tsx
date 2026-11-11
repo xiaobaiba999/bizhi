@@ -65,7 +65,7 @@ const INSTALL_STEPS: Record<Platform, string[]> = {
 const UNINSTALL_STEPS: Record<Platform, string[]> = {
   windows: [
     "exe 安装版：开始菜单右键「壁纸工坊」→ 卸载，或 设置 → 应用 → 安装的应用 → 壁纸工坊 → 卸载",
-    "卸载向导中勾选「同时删除应用数据」→ 安装目录、数据库、缓存全部清除，无任何残留",
+    "卸载向导默认保留用户数据（数据库、屏蔽记录）；勾选「同时删除应用数据」才会连数据一并清除，彻底无残留",
     "网页版（PWA）：开始菜单右键 → 卸载；或 chrome://apps 右键图标 → 移除 Chrome 应用",
   ],
   macos: ["启动台长按拖入废纸篓；或打开 chrome://apps 右键图标 → 移除 Chrome 应用"],
@@ -238,7 +238,7 @@ export function AppInstallDialog() {
               <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
                 正经的桌面软件安装包：向导式安装、独立窗口运行、桌面与开始菜单快捷方式、
                 壁纸自动存入「下载」文件夹，可在「下载位置」里调起系统磁盘文件夹任意选择保存位置；
-                卸载走系统应用管理，勾选删除数据即可彻底清理。
+                卸载走系统应用管理，勾选删除数据才会清理数据库，正常卸载不丢屏蔽记录。
               </p>
               <a
                 href={`/desktop/${SETUP_EXE_NAME}`}
@@ -246,12 +246,12 @@ export function AppInstallDialog() {
                 className="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
               >
                 <Download className="size-4" />
-                下载安装包（v{APP_VERSION} · 约 168MB）
+                下载安装包（v{APP_VERSION} · 约 167MB）
               </a>
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/80">
-                v{APP_VERSION} 更新：修复「必须手动删除整个目录才能重新安装」的问题 ——
-                旧版卸载器未完成时，新安装包会自动清理残留后继续安装，无需再手动删；
-                卸载时同步清理本地缓存目录，卸载更干净；安装到中文路径（如 E:\壁纸工坊\）完全支持。
+                v{APP_VERSION} 更新：屏蔽记录从此永久保留 —— 升级安装全程护送数据目录，
+                旧版卸载器再也删不到；数据库永不因缺表缺列重建，旧库自动修补缺的表和列，
+                已有记录一条不丢；分类精简为「电脑壁纸 / 手机壁纸」，下载位置网页版也会永久记住。
                 安装过旧版本的用户直接下载新版覆盖安装即可，无需卸载。未签名应用首次运行时
                 SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。
               </p>
@@ -322,9 +322,10 @@ export function AppInstallDialog() {
             </div>
             <p className="mt-3 flex gap-2 rounded-2xl bg-muted px-3.5 py-2.5 text-xs leading-relaxed text-muted-foreground">
               <Info className="size-4 shrink-0 translate-y-0.5" />
-              exe 安装版卸载时由 NSIS 卸载器清理安装目录，并可选删除用户数据目录（数据库）；
-              网页版在本地只占用「缓存 + 本地存储」，卸载时自动一并清除。
-              两者均不会在系统中留下文件或注册表残留；下载的壁纸保存在用户「下载」文件夹，属于用户自己的文件。
+              exe 安装版卸载时由 NSIS 卸载器清理安装目录；用户数据目录（数据库/屏蔽记录）
+              仅在卸载向导中主动勾选「同时删除应用数据」时才会清理，正常卸载不丢数据；
+              网页版在本地只占用「缓存 + 本地存储 + 自选目录记忆」，卸载时自动一并清除。
+              两者均不会在系统中留下文件或注册表残留；下载的壁纸保存在用户自己选择的目录，属于用户自己的文件。
             </p>
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <button

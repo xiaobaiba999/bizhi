@@ -34,17 +34,9 @@ export interface ZhefengCategory {
   wpType: 1 | 2
 }
 
-/** 与源站一致的分类导航（推荐 / 手机壁纸走 typeId 为空） */
+/** 分类导航：仅保留 电脑壁纸 / 手机壁纸 两类（wpType 决定源站返回的壁纸类型） */
 export const ZHEFENG_CATEGORIES: ZhefengCategory[] = [
-  { key: "recommend", name: "推荐", typeId: "", wpType: 1 },
-  { key: "charm", name: "魅力·迷人", typeId: "35c203f75643ac7803b8f706fa91ef40", wpType: 1 },
-  { key: "art", name: "自制·艺术", typeId: "ea0a4b100d440b83f2feec8abbd3d9e1", wpType: 1 },
-  { key: "easy", name: "安逸·自由", typeId: "760943d7b1ac898ff9eb31900cbf5df7", wpType: 1 },
-  { key: "scifi", name: "科幻·星云", typeId: "55bcd42f60c4631af0a90bacec892958", wpType: 1 },
-  { key: "anime", name: "动漫·二次元", typeId: "553dff627434cc5683a776216c6045d2", wpType: 1 },
-  { key: "nature", name: "自然·风景", typeId: "0202b9e54c3e843a4e70dc0150399d11", wpType: 1 },
-  { key: "game", name: "游戏·玩具", typeId: "15ea11c65ce0d00c1e4bf042a66dbe15", wpType: 1 },
-  { key: "code", name: "程序·代码", typeId: "25e2d674a895d54b467a9e4820a12e04", wpType: 1 },
+  { key: "desktop", name: "电脑壁纸", typeId: "", wpType: 1 },
   { key: "phone", name: "手机壁纸", typeId: "", wpType: 2 },
 ]
 
