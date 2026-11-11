@@ -1,4 +1,4 @@
-:HL["/bizhi/_next/static/chunks/2dudlrrxd14l4.css","style"]
+:HL["/bizhi/_next/static/chunks/0ndi9ydib0_du.css","style"]
 2:[["children",{"s":"__PAGE__","h":160}]]
 1:[["children",{"s":"/_not-found","h":96,"c":"$Q2"}]]
-0:{"b":"ky-Ve4U6lCsIWW8P5swQ-","t":{"t":{"s":"","h":80,"c":"$Q1"}}}
+0:{"b":"8ymtP8liRO41s_IXcpQsR","t":{"t":{"s":"","h":80,"c":"$Q1"}}}
