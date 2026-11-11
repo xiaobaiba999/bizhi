@@ -16,7 +16,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { APP_VERSION, SETUP_EXE_NAME } from "@/lib/version"
+import { APP_VERSION, SETUP_EXE_NAME, RELEASE_SETUP_URL, GITHUB_REPO } from "@/lib/version"
 import { usePwaStore } from "@/lib/pwa-store"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -241,13 +241,31 @@ export function AppInstallDialog() {
                 卸载走系统应用管理，勾选删除数据才会清理数据库，正常卸载不丢屏蔽记录。
               </p>
               <a
-                href={`/desktop/${SETUP_EXE_NAME}`}
+                href={
+                  process.env.NEXT_PUBLIC_STATIC_EXPORT === "1"
+                    ? RELEASE_SETUP_URL
+                    : `/desktop/${SETUP_EXE_NAME}`
+                }
                 download
                 className="mt-3 inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-primary text-sm font-bold text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:brightness-105 active:scale-[0.98]"
               >
                 <Download className="size-4" />
                 下载安装包（v{APP_VERSION} · 约 167MB）
               </a>
+              {process.env.NEXT_PUBLIC_STATIC_EXPORT === "1" && (
+                <p className="mt-1.5 text-center text-[11px] text-muted-foreground">
+                  由 GitHub Release 分发 · 也可在仓库
+                  <a
+                    href={`https://github.com/${GITHUB_REPO}/releases`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mx-1 font-semibold text-foreground underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+                  >
+                    Releases 页面
+                  </a>
+                  查看全部版本
+                </p>
+              )}
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/80">
                 v{APP_VERSION} 更新：屏蔽记录从此永久保留 —— 升级安装全程护送数据目录，
                 旧版卸载器再也删不到；数据库永不因缺表缺列重建，旧库自动修补缺的表和列，

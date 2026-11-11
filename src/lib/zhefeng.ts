@@ -58,12 +58,36 @@ export function isZhefengImageUrl(url: string): boolean {
 }
 
 /**
- * 哲风壁纸图片走服务端代理展示（绕过 CDN Referer 防盗链）。
+ * 哲风壁纸图片展示链接：
+ * - 静态导出构建：CDN 直链（页面全局 no-referrer 绕过防盗链；CDN CORS 全开）
+ * - 服务器模式：走服务端代理（/api/wallpapers/img，绕过 CDN Referer 防盗链）
  * 其他来源（本地素材 / dataURL）原样返回。
  */
 export function proxyImageUrl(src: string): string {
+  if (process.env.NEXT_PUBLIC_STATIC_EXPORT === "1") return src
   if (!isZhefengImageUrl(src)) return src
   return `/api/wallpapers/img?src=${encodeURIComponent(src)}`
+}
+
+/**
+ * <img> 加载失败自动回退原图（缩略变体 404 / 网络抖动）。
+ * 首次失败换原图（两种模式都过 proxyImageUrl，静态直连 / 服务器代理各自正确）；
+ * 二次失败追加 r=1 破缓存重试一次。
+ * 用法：onError={imgFallback(w.src)}
+ */
+export function imgFallback(originalSrc: string) {
+  return (e: { currentTarget: HTMLImageElement }) => {
+    const el = e.currentTarget
+    if (el.dataset.wwOriginal === "1") {
+      if (!el.dataset.wwRetried) {
+        el.dataset.wwRetried = "1"
+        el.src = `${el.src}${el.src.includes("?") ? "&" : "?"}r=1`
+      }
+      return
+    }
+    el.dataset.wwOriginal = "1"
+    el.src = proxyImageUrl(originalSrc)
+  }
 }
 
 /* ------------------------------ HTML 解析 ------------------------------ */

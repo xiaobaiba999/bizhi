@@ -9,6 +9,9 @@ import {
 } from "@/lib/pwa-store"
 import { AppInstallDialog } from "@/components/pwa/install-dialog"
 
+/** 静态导出于路径（GitHub Pages 项目页如 /bizhi；根路径 / dev / 桌面版为空串） */
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || ""
+
 /**
  * PWA 全局挂载点：
  * - 注册 Service Worker（满足可安装条件 + 离线外壳）
@@ -42,10 +45,13 @@ export function PwaProvider() {
 
     // 3) 注册 Service Worker（不支持 / 非安全环境 / Electron 桌面版时静默跳过）
     //    Electron 桌面版：本地服务器随应用运行，离线缓存无意义且可能造成陈旧页面
+    //    子路径托管（如 GitHub Pages /bizhi）时 sw.js 与 scope 同步加前缀
     const isDesktopApp = Boolean((window as unknown as { desktopApp?: unknown }).desktopApp)
     if (!isDesktopApp && "serviceWorker" in navigator) {
       const register = () => {
-        navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {})
+        navigator.serviceWorker
+          .register(`${BASE_PATH}/sw.js`, { scope: `${BASE_PATH}/` })
+          .catch(() => {})
       }
       if (document.readyState === "complete") register()
       else window.addEventListener("load", register, { once: true })

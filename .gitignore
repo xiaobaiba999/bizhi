@@ -43,6 +43,18 @@ next-env.d.ts
 /public/desktop/
 /download/*.exe
 
+# GitHub Pages 静态导出产物与构建临时目录（由 scripts/build-gh-pages.mjs 生成/恢复）
+/.gh-pages-build/
+/github-pages-dist/
+/.api-stash/
+/.desktop-stash/
+/.zip-stash/
+/.instrumentation-stash.ts
+/public/*.zip
+
+# 静态版本地验证服务器（一次性测试工具）
+/mini-gh-pages-test/
+
 # 本地运行数据与日志（含登录令牌等敏感数据，绝不入库）
 /db/
 /dev.log
