@@ -19,6 +19,10 @@ export const metadata: Metadata = {
   description:
     "壁纸工坊：实时获取哲风壁纸高清壁纸，分类浏览、原图预览、单张 / 批量下载，下载过的自动隐藏。支持安装到桌面独立运行，卸载不留残留。",
   applicationName: "壁纸工坊",
+  // PWA 清单（静态文件 public/manifest.webmanifest —— 三种构建形态通用，
+  // 不用 metadata 路由：cacheComponents 与路由段配置不兼容，
+  // 静态导出构建时由 scripts/build-gh-pages.mjs 改写子路径）
+  manifest: `${process.env.NEXT_PUBLIC_BASE_PATH || ""}/manifest.webmanifest`,
   // 页面全局不发 Referer：静态版直连 CDN 图片绕过防盗链（服务端代理模式不受影响）
   referrer: "no-referrer",
   appleWebApp: {
