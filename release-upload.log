@@ -1,0 +1,16 @@
+[release] 目标：xiaobaiba999/bizhi 的 v1.4.3 Release
+    本地安装包: /home/z/my-project/release/out/壁纸工坊-Setup-1.4.3.exe
+    附件名: WallpaperWorkshop-Setup-v1.4.3.exe（211.0MB）
+
+[release] ① 校验仓库与 token
+    仓库: xiaobaiba999/bizhi
+[release] ② 查找 / 创建 v1.4.3 Release
+    Release 已创建（id=443805710，tag=v1.4.3）
+[release] ③ 清理同名旧附件（如有）
+[release] ④ 上传安装包附件
+    上传中（第 1 次，211MB）…
+
+[release] 完成 ✔
+    Release: https://github.com/xiaobaiba999/bizhi/releases/tag/v1.4.3
+    附件直链: https://github.com/xiaobaiba999/bizhi/releases/download/v1.4.3/WallpaperWorkshop-Setup-v1.4.3.exe
+    （网页版下载按钮指向同一 URL，自动保持一致）

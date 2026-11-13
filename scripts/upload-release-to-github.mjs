@@ -56,7 +56,19 @@ const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"))
 const VERSION = pkg.version;
 const TAG = `v${VERSION}`;
 const ASSET_NAME = `WallpaperWorkshop-Setup-v${VERSION}.exe`;
-const LOCAL_EXE = process.argv[3] || path.join(ROOT, "release", `壁纸工坊-Setup-${VERSION}.exe`);
+/** 安装包位置（electron-builder 输出在 release/out/，脚本参数可覆盖） */
+function resolveLocalExe() {
+  const arg = process.argv[3];
+  if (arg && !arg.startsWith("-")) return arg;
+  for (const p of [
+    path.join(ROOT, "release", "out", `壁纸工坊-Setup-${VERSION}.exe`),
+    path.join(ROOT, "release", `壁纸工坊-Setup-${VERSION}.exe`),
+  ]) {
+    if (fs.existsSync(p)) return p;
+  }
+  return path.join(ROOT, "release", "out", `壁纸工坊-Setup-${VERSION}.exe`);
+}
+const LOCAL_EXE = resolveLocalExe();
 
 if (!fs.existsSync(LOCAL_EXE)) {
   console.error(`[release] 未找到安装包: ${LOCAL_EXE}`);
