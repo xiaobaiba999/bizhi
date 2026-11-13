@@ -2,7 +2,8 @@
 
 import { Download, FolderOpen, ImageIcon, MousePointerClick, X } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { proxyImageUrl, type ZhefengWallpaper } from "@/lib/zhefeng"
+import { displayFallbackChain, type ZhefengWallpaper } from "@/lib/zhefeng"
+import { WallpaperImage } from "@/components/workshop/wallpaper-image"
 
 interface SelectionPanelProps {
   items: ZhefengWallpaper[]
@@ -74,16 +75,13 @@ export function SelectionPanel({
               >
                 <span
                   className={cn(
-                    "relative shrink-0 overflow-hidden rounded-lg border border-border bg-muted",
+                    "relative shrink-0 overflow-hidden rounded-lg border border-border",
                     isPhone ? "aspect-[9/16] h-16" : "aspect-[16/10] h-16"
                   )}
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={proxyImageUrl(w.thumb)}
+                  <WallpaperImage
+                    candidates={displayFallbackChain(w)}
                     alt={`已选壁纸 ${w.title}`}
-                    loading="lazy"
-                    decoding="async"
                     className="size-full object-cover"
                   />
                 </span>

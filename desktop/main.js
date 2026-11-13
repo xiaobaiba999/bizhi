@@ -242,6 +242,9 @@ function startServer(port) {
     HOSTNAME: "127.0.0.1",
     // Prisma SQLite 绝对路径（Windows 下用正斜杠）
     DATABASE_URL: "file:" + dbPath.replace(/\\/g, "/"),
+    // 壁纸图片磁盘缓存目录（v1.4.3：缩略图/预览图跨重启秒开；
+    // 随用户数据目录在升级护送中一并保留，卸载应用时一并清理）
+    WF_IMG_CACHE_DIR: path.join(dataDir(), "img-cache"),
   };
 
   console.log(`[desktop] 启动内嵌服务器 127.0.0.1:${port}，数据库 ${dbPath}`);

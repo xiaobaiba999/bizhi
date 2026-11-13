@@ -22,8 +22,7 @@ import { cn } from "@/lib/utils"
 import { APP_VERSION } from "@/lib/version"
 import {
   ZHEFENG_CATEGORIES,
-  proxyImageUrl,
-  imgFallback,
+  displayFallbackChain,
   type ZhefengWallpaper,
 } from "@/lib/zhefeng"
 import {
@@ -47,6 +46,7 @@ import {
 } from "@/lib/desktop"
 import { TokenSettingsDialog } from "@/components/workshop/token-settings"
 import { SelectionPanel } from "@/components/workshop/selection-panel"
+import { WallpaperImage } from "@/components/workshop/wallpaper-image"
 import {
   clearWebDownloadDir,
   loadWebDownloadDir,
@@ -946,7 +946,7 @@ export function WorkshopTab() {
           </div>
         ) : (
           <div className={cn("grid gap-3", isPhone ? "grid-cols-2 @sm:grid-cols-3 @xl:grid-cols-4 @3xl:grid-cols-5 @5xl:grid-cols-6" : "grid-cols-1 @sm:grid-cols-2 @2xl:grid-cols-3 @4xl:grid-cols-4")}>
-            {list.items.map((w) => {
+            {list.items.map((w, idx) => {
               const order = selected.findIndex((p) => p.id === w.id)
               const isSelected = order >= 0
               return (
@@ -968,14 +968,11 @@ export function WorkshopTab() {
                       : "border-transparent shadow-sm hover:-translate-y-1 hover:shadow-lg"
                   )}
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={proxyImageUrl(w.thumb)}
+                  <WallpaperImage
+                    candidates={displayFallbackChain(w)}
                     alt={`壁纸 ${w.title}`}
-                    loading="lazy"
-                    decoding="async"
-                    onError={imgFallback(w.src)}
-                    className="size-full bg-muted object-cover transition-transform duration-300 group-hover:scale-105"
+                    eager={idx < 6}
+                    className="size-full object-cover group-hover:scale-105"
                   />
 
                   {/* 分辨率徽标 */}
@@ -1199,19 +1196,14 @@ function WallpaperPreviewDialog({
               {imgLoading && (
                 <span className="absolute z-10 flex size-8 animate-spin rounded-full border-2 border-white/30 border-t-white" />
               )}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={proxyImageUrl(wallpaper.src)}
+              <WallpaperImage
+                candidates={[wallpaper.src]}
                 alt={`壁纸 ${wallpaper.title}`}
+                eager
+                placeholder={false}
                 onLoad={onImgLoaded}
-                onError={(e) => {
-                  onImgLoaded()
-                  imgFallback(wallpaper.src)(e)
-                }}
-                className={cn(
-                  "max-h-[60vh] w-auto max-w-full object-contain transition-opacity",
-                  imgLoading ? "opacity-0" : "opacity-100"
-                )}
+                onGiveUp={onImgLoaded}
+                className="max-h-[60vh] w-auto max-w-full bg-transparent object-contain"
               />
             </div>
             <div className="p-4">
