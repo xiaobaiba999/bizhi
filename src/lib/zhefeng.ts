@@ -74,6 +74,8 @@ export function proxyImageUrl(src: string): string {
  * 首次失败换原图（两种模式都过 proxyImageUrl，静态直连 / 服务器代理各自正确）；
  * 二次失败追加 r=1 破缓存重试一次。
  * 用法：onError={imgFallback(w.src)}
+ * v1.4.3：网格/面板已改用 WallpaperImage 组件（完整回退链 + 占位骨架），
+ * 此函数仅保留给预览弹窗等直连原图场景。
  */
 export function imgFallback(originalSrc: string) {
   return (e: { currentTarget: HTMLImageElement }) => {
@@ -88,6 +90,21 @@ export function imgFallback(originalSrc: string) {
     el.dataset.wwOriginal = "1"
     el.src = proxyImageUrl(originalSrc)
   }
+}
+
+/** 原图 URL 的 s240 缩略变体（srcset 缺失时源站实际存在的兜底缩略图） */
+export function s240VariantOf(src: string): string {
+  const dot = src.lastIndexOf(".")
+  return dot === -1 ? src : `${src.slice(0, dot)}_s240q80.webp`
+}
+
+/**
+ * 网格显示回退链：缩略图 → s240 兜底缩略图 → 原图（去重保序）。
+ * 之前缩略图 404 直接跳原图（2K/4K 巨图当缩略图加载 → 「部分图片显示太慢」的元凶），
+ * 现在先落到真实存在的 s240 小图，只有全部失败才用原图兜底。
+ */
+export function displayFallbackChain(w: { thumb: string; src: string }): string[] {
+  return Array.from(new Set([w.thumb, s240VariantOf(w.src), w.src].filter(Boolean)))
 }
 
 /* ------------------------------ HTML 解析 ------------------------------ */

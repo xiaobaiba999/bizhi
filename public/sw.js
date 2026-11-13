@@ -1,4 +1,4 @@
-/* 壁纸工坊 Service Worker —— v1.0.13-2
+/* 壁纸工坊 Service Worker —— v1.4.3
  * - 离线外壳：页面导航网络优先，失败回退缓存
  * - /_next 构建产物：网络优先 + 离线回退（开发模式 chunk URL 无内容哈希，缓存优先会永远命中旧代码）
  * - 不可变静态资源（图标/字体/manifest）：缓存优先
@@ -7,7 +7,7 @@
  * - 激活时清理旧版本缓存（缓存名带版本号，升级自动换血）
  * - 卸载应用时，系统会连同这些缓存一起清除，无残留
  */
-const VERSION = "v1.0.13-2"
+const VERSION = "v1.4.3"
 const SHELL_CACHE = `ww-shell-${VERSION}`
 const ASSET_CACHE = `ww-assets-${VERSION}`
 const IMG_CACHE = `ww-img-${VERSION}`
