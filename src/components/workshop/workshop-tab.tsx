@@ -184,6 +184,10 @@ export function WorkshopTab() {
   const [catKey, setCatKey] = useState("desktop")
   const [reloadNonce, setReloadNonce] = useState(0)
   const [list, setList] = useState<ListState>(INITIAL)
+  /** 后台刷新中（刷新按钮旋转、重复点击防抖） */
+  const [refreshing, setRefreshing] = useState(false)
+  /** 图片强制重试信号：顶部刷新按钮递增，失败/未加载完的图立即重试 */
+  const [imgRetryNonce, setImgRetryNonce] = useState(0)
   const [selected, setSelected] = useState<ZhefengWallpaper[]>([])
   const [preview, setPreview] = useState<ZhefengWallpaper | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -202,6 +206,13 @@ export function WorkshopTab() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const seqRef = useRef(0)
+  /** 后台刷新单飞守卫（防止 8s/32s 自动刷新与手动刷新重叠） */
+  const refreshingRef = useRef(false)
+  /** 最新已加载页码 / 列表加载态（延迟到期的自动刷新读取实时值，避免闭包过期） */
+  const pageRef = useRef(0)
+  const listLoadingRef = useRef(false)
+  pageRef.current = list.page
+  listLoadingRef.current = list.loading
   /** 桌面版下载保存目录（网页版为 null） */
   const [dlDir, setDlDir] = useState<string | null>(null)
   /** 网页版自选的本机保存目录名（File System Access；桌面版恒 null 走 Electron） */
@@ -365,6 +376,74 @@ export function WorkshopTab() {
     })()
   }, [catKey, reloadNonce, hideDownloaded])
 
+  /**
+   * 后台刷新（v1.4.4）：重新抓取第 1 页并整表替换，但绝不清空当前网格 ——
+   * 抓取期间旧壁纸继续显示，失败也保持原样（仅提示），彻底告别
+   * 「下载 18 张后图片直接不显示」（旧逻辑会先把网格重置成骨架屏，抓取失败更是整屏清空）。
+   * seq 与首屏加载 / 加载更多共用：切换分类 / 翻页中的过期结果自动作废。
+   */
+  const refreshList = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const silent = opts?.silent ?? false
+      if (refreshingRef.current) return
+      refreshingRef.current = true
+      setRefreshing(true)
+      const seq = ++seqRef.current
+      try {
+        const data = await loadWallpaperPage(catKey, 1, hideDownloaded)
+        if (seq !== seqRef.current) return
+        setList({
+          items: data.items,
+          page: 1,
+          hasMore: data.hasMore && data.items.length > 0,
+          loading: false,
+          error: null,
+        })
+        setDownloadedCount(data.downloadedCount)
+        setBlockedCount(data.blockedCount)
+        if (!silent) toast.success("壁纸已刷新", { id: "wf-refreshed", duration: 2000 })
+      } catch (e) {
+        if (seq !== seqRef.current) return
+        // 失败不清屏：当前壁纸继续显示，交给用户手动重试（顶部刷新按钮）
+        setList((s) =>
+          s.items.length > 0
+            ? { ...s, loading: false }
+            : {
+                items: [],
+                page: 0,
+                hasMore: true,
+                loading: false,
+                error: e instanceof Error ? e.message : "刷新失败",
+              }
+        )
+        toast.error("刷新失败，当前壁纸仍可浏览", {
+          description: e instanceof Error ? e.message : undefined,
+          duration: 5000,
+        })
+      } finally {
+        refreshingRef.current = false
+        setRefreshing(false)
+      }
+    },
+    [catKey, hideDownloaded]
+  )
+
+  /** 永远指向最新 refreshList 的 ref（延迟到期的自动刷新用它，避免闭包过期） */
+  const refreshListRef = useRef(refreshList)
+  refreshListRef.current = refreshList
+
+  /**
+   * 延迟后台自动刷新：仅当用户还停在第 1 页（没翻页）且当前没有加载任务时才刷新，
+   * 避免把用户正在浏览的多页列表一下拽回第 1 页。
+   */
+  const autoRefreshLater = useCallback((delay: number) => {
+    setTimeout(() => {
+      if (pageRef.current <= 1 && !listLoadingRef.current) {
+        void refreshListRef.current({ silent: true })
+      }
+    }, delay)
+  }, [])
+
   // 无限滚动：哨兵进入可视区即加载下一页
   useEffect(() => {
     const el = sentinelRef.current
@@ -391,13 +470,15 @@ export function WorkshopTab() {
     })
   }
 
-  /** 隐藏 iframe 导航下载（浏览器默认目录 / Electron 静默保存到自选目录） */
+  /** 隐藏 iframe 导航下载（浏览器默认目录 / Electron 静默保存到自选目录）。
+   *  生命周期 10 分钟：服务端并发限流后大文件按批排队，慢速网络下排队可至几分钟，
+   *  早删 iframe 会取消还没开始响应的排队请求 */
   const iframeDownload = (w: ZhefengWallpaper) => {
     const frame = document.createElement("iframe")
     frame.style.display = "none"
     frame.src = downloadUrl(w)
     document.body.appendChild(frame)
-    setTimeout(() => frame.remove(), 120000)
+    setTimeout(() => frame.remove(), 600_000)
   }
 
   /** 网页版直写完成提示（批量合并为一条「已保存 N 张」） */
@@ -595,10 +676,11 @@ export function WorkshopTab() {
     })
   }
 
-  /** 批量下载选中壁纸 */
+  /** 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再 3 张一批排队回源），
+   *  18 张全部铺开也不会挤占缩略图代理的带宽 */
   const batchDownload = () => {
     if (selected.length === 0) return
-    selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 400))
+    selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 700))
     toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
       description: dlDir
         ? `保存位置：${dlDir}，完成后可点「打开文件夹」`
@@ -607,11 +689,16 @@ export function WorkshopTab() {
           : undefined,
       duration: 6000,
     })
-    // 乐观移除：稍后刷新列表让服务端记录生效
+    // 乐观移除：下载记录落库后由后台刷新同步真实状态
     const ids = new Set(selected.map((w) => w.id))
     setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
     setSelected([])
-    if (hideDownloaded) setTimeout(() => setReloadNonce((n) => n + 1), 8000)
+    // 后台静默刷新两趟（不清屏、失败也不影响当前显示）：
+    // 8s 同步已落库的下载记录，32s 兑现仍在排队中的尾部下载
+    if (hideDownloaded) {
+      autoRefreshLater(8_000)
+      autoRefreshLater(32_000)
+    }
   }
 
   /** 单张下载：乐观移除（hideDownloaded 开启时） */
@@ -849,6 +936,24 @@ export function WorkshopTab() {
             ))}
           </div>
 
+          {/* 手动刷新（v1.4.4）：重新抓取列表 + 失败图片立即重试；抓取失败不清屏 */}
+          <button
+            type="button"
+            onClick={() => {
+              setImgRetryNonce((n) => n + 1)
+              void refreshList()
+            }}
+            disabled={refreshing}
+            title="重新抓取壁纸列表，并重试未加载成功的图片"
+            aria-label="刷新壁纸列表，并重试未加载成功的图片"
+            className={cn(
+              "inline-flex h-7 items-center gap-1.5 rounded-full border border-border px-2.5 text-[11px] font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground disabled:pointer-events-none disabled:opacity-60"
+            )}
+          >
+            <RefreshCw className={cn("size-3", refreshing && "animate-spin")} />
+            {refreshing ? "刷新中…" : "刷新"}
+          </button>
+
           {/* 已下载过滤 + 屏蔽计数（容器内吸顶） */}
           <div className="flex shrink-0 flex-col items-end gap-0.5 pb-1">
             <button
@@ -972,6 +1077,7 @@ export function WorkshopTab() {
                     candidates={displayFallbackChain(w)}
                     alt={`壁纸 ${w.title}`}
                     eager={idx < 6}
+                    reloadKey={imgRetryNonce}
                     className="size-full object-cover group-hover:scale-105"
                   />
 

@@ -100,6 +100,42 @@ function assemble() {
 
   // Next standalone 服务器
   fs.cpSync(path.join(DIST, "standalone"), SERVER_OUT, { recursive: true });
+  // Next standalone 会把项目根下的杂项几乎全量复制进来，全部清掉：
+  // - skills / upload / download / tool-results / build / scripts / release：
+  //   开发环境文件与旧构建产物（曾使安装包虚胖 60MB+ 并逐轮滚雪球）
+  // - src / prisma：已编译进 server.js（数据库修补用 instrumentation 内嵌 SQL，
+  //   运行时不需要源码与 schema）
+  // - bun.lock / 各类文档与配置残留
+  // - db：桌面版数据库由主进程用 empty.db 模板在用户数据目录创建（护送/修补逻辑），
+  //   这里的 custom.db 是构建机的测试数据（含下载记录），绝不能进安装包
+  // 保留：server.js / package.json / node_modules / .next-desktop(static) / public
+  for (const junk of [
+    "skills",
+    "upload",
+    "download",
+    "tool-results",
+    "build",
+    "scripts",
+    "release",
+    "src",
+    "prisma",
+    "desktop",
+    "db",
+    "bun.lock",
+    "dev.log",
+    "build-desktop.log",
+    "release-upload.log",
+    "AGENTS.md",
+    "GITHUB_DEPLOY.md",
+    "README.md",
+    "eslint.config.mjs",
+    "components.json",
+    "tsconfig.json",
+    "next.config.ts",
+    "electron-builder.yml",
+  ]) {
+    fs.rmSync(path.join(SERVER_OUT, junk), { recursive: true, force: true });
+  }
   // 客户端静态资源：自定义 distDir 为 .next-desktop → static 须放在 server/.next-desktop/static
   // （standalone 服务器按 next.config 里烘焙的 distDir 解析 /_next/static 的磁盘位置）
   fs.cpSync(path.join(DIST, "static"), path.join(SERVER_OUT, ".next-desktop", "static"), {
@@ -206,6 +242,13 @@ if (!wantAssemble && !wantLinux && !wantWin) {
   console.log("用法: node scripts/build-desktop.mjs --assemble | --linux | --win");
   process.exit(0);
 }
+
+// 构建前清理（v1.4.4）：Next standalone 会把项目根当时的内容几乎全量复制进
+// .next-desktop/standalone —— 若上一轮产物 release/out（数百 MB）还在，
+// 会被递归嵌套进安装包里，每构建一轮体积滚一次雪球。
+// 开工先把旧构建目录与旧产物清干净，保证 standalone 复制到的是干净项目。
+fs.rmSync(path.join(ROOT, "release", "out"), { recursive: true, force: true });
+fs.rmSync(path.join(ROOT, ".next-desktop"), { recursive: true, force: true });
 
 // WF_SKIP_NEXT_BUILD=1：.next-desktop 已存在时跳过生产构建（分步构建用）
 if (process.env.WF_SKIP_NEXT_BUILD !== "1") {

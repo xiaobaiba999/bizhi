@@ -60,3 +60,6 @@ next-env.d.ts
 /dev.log
 /build-desktop.log
 /upload/
+
+# 一次性测试工具（CDN 故障注入等）
+/tool-results/

@@ -26,7 +26,9 @@ async function fetchUpstream(src: string, key: string): Promise<UpstreamResult |
     try {
       const upstream = await fetch(src, {
         headers: upstreamHeaders(),
-        signal: AbortSignal.timeout(30000),
+        // 15s：缩略图小文件，健康链路 <1s；超时快速失败把机会留给
+        // 客户端回退链 / 自动重试（批量下载挤占带宽的窗口几秒即恢复）
+        signal: AbortSignal.timeout(15000),
         cache: "no-store",
       })
       if (!upstream.ok) {
@@ -77,8 +79,12 @@ export async function GET(req: NextRequest) {
   const hit = await readImgCache(key)
   if (hit) return imgResponse(hit.buffer, hit.contentType, hit.source)
 
-  // 2) 未命中 → 回源（并发去重）
-  const fresh = await (inflight.get(key) ?? fetchUpstream(src, key))
+  // 2) 未命中 → 回源（并发去重；瞬时失败 1s 后原地再试一次）
+  let fresh = await (inflight.get(key) ?? fetchUpstream(src, key))
+  if (!fresh) {
+    await new Promise((r) => setTimeout(r, 1000))
+    fresh = await (inflight.get(key) ?? fetchUpstream(src, key))
+  }
   if (!fresh) return new NextResponse(null, { status: 502 })
 
   return imgResponse(fresh.buffer, fresh.contentType, "miss")

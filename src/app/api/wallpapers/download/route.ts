@@ -3,6 +3,16 @@ import { db } from "@/lib/db"
 import { isZhefengImageUrl, upstreamHeaders } from "@/lib/zhefeng"
 import { zfCompleteUrl, zfUpstreamHeaders } from "@/lib/zf-login"
 import { ensureCertified, invalidateCertification } from "@/lib/zf-certify"
+import { createSemaphore } from "@/lib/semaphore"
+
+/**
+ * 回源并发上限（v1.4.4）：同一时刻最多 3 个原图回源，其余 FIFO 排队。
+ * 之前批量下载 18 张时全部并发回源，挤占带宽 + 触发 CDN 限流，
+ * 导致缩略图代理集体超时——网格图片「下载后直接不显示」的元凶。
+ * 限流后大文件 3 张一批排队走，图片代理与列表接口始终保持秒开。
+ * 排队等待上限 8 分钟（覆盖 18 张 × 单张 60s 超时的最坏队列等待）。
+ */
+const dlSlots = createSemaphore(3, 8 * 60_000)
 
 
 /** 清洗文件名：去掉 Windows / macOS 非法字符 */
@@ -130,80 +140,102 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // ① 有令牌 → 官网原图直链
-    let quality: "preview" | "original" = "preview"
-    let target = src
-    let extraHeaders: Record<string, string> = upstreamHeaders()
-    let authExpired = false
+    // ① 占用回源槽位（最多 3 张并发，其余排队；排队超时抛 DOWNLOAD_QUEUE_TIMEOUT）
+    await dlSlots.acquire()
 
-    if (wtId) {
-      const tokenRow = await db.zfToken.findFirst({ orderBy: { createdAt: "desc" } })
-      if (tokenRow) {
-        try {
-          // 官网要求先过「我不是机器人」ALTCHA 人机验证，
-          // 否则 getCompleteUrl 一律 305 [错误的请求 -> 3004]
-          let cookie = await ensureCertified()
+    try {
+      // 令牌流程（人机验证 + getCompleteUrl）也在槽位内：拿到原图直链
+      let quality: "preview" | "original" = "preview"
+      let target = src
+      let extraHeaders: Record<string, string> = upstreamHeaders()
+      let authExpired = false
+
+      if (wtId) {
+        const tokenRow = await db.zfToken.findFirst({ orderBy: { createdAt: "desc" } })
+        if (tokenRow) {
           try {
-            const url = await fetchCompleteUrl(wtId, tokenRow.token, cookie)
-            target = url
-            quality = "original"
-            extraHeaders = zfUpstreamHeaders({ token: tokenRow.token })
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e)
-            if (msg === "AUTH_EXPIRED") throw e
-            // 3004：人机验证可能过期 → 强制重新验证后重试一次
-            if (msg.startsWith("CERTIFY_OR_PARAM_ERROR")) {
-              invalidateCertification()
-              cookie = await ensureCertified(true)
+            // 官网要求先过「我不是机器人」ALTCHA 人机验证，
+            // 否则 getCompleteUrl 一律 305 [错误的请求 -> 3004]
+            let cookie = await ensureCertified()
+            try {
               const url = await fetchCompleteUrl(wtId, tokenRow.token, cookie)
               target = url
               quality = "original"
               extraHeaders = zfUpstreamHeaders({ token: tokenRow.token })
-            } else {
-              throw e
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e)
+              if (msg === "AUTH_EXPIRED") throw e
+              // 3004：人机验证可能过期 → 强制重新验证后重试一次
+              if (msg.startsWith("CERTIFY_OR_PARAM_ERROR")) {
+                invalidateCertification()
+                cookie = await ensureCertified(true)
+                const url = await fetchCompleteUrl(wtId, tokenRow.token, cookie)
+                target = url
+                quality = "original"
+                extraHeaders = zfUpstreamHeaders({ token: tokenRow.token })
+              } else {
+                throw e
+              }
             }
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          if (msg === "AUTH_EXPIRED") {
-            // 令牌确实失效：回退预览质量（前端会提示重新登录）
-            authExpired = true
-          } else {
-            console.error("getCompleteUrl error:", e)
-            // 其他异常：回退预览质量
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            if (msg === "AUTH_EXPIRED") {
+              // 令牌确实失效：回退预览质量（前端会提示重新登录）
+              authExpired = true
+            } else {
+              console.error("getCompleteUrl error:", e)
+              // 其他异常：回退预览质量
+            }
           }
         }
       }
-    }
 
-    // ② 回源代理下载
-    const upstream = await fetch(target, {
-      headers: extraHeaders,
-      signal: AbortSignal.timeout(60000),
-      cache: "no-store",
-    })
-    if (!upstream.ok || !upstream.body) {
+      // ② 回源下载：整段读入内存后再响应（拿到完整字节即释放槽位，
+      //    流式响应会一直占用到客户端收完，排队就失去意义）
+      const upstream = await fetch(target, {
+        headers: extraHeaders,
+        signal: AbortSignal.timeout(60000),
+        cache: "no-store",
+      })
+      if (!upstream.ok) {
+        return NextResponse.json(
+          { error: `原图下载失败（HTTP ${upstream.status}）` },
+          { status: 502 }
+        )
+      }
+      const contentType = upstream.headers.get("content-type") ?? "application/octet-stream"
+      const buffer = Buffer.from(await upstream.arrayBuffer())
+      if (buffer.length === 0) {
+        return NextResponse.json({ error: "原图内容为空" }, { status: 502 })
+      }
+
+      await recordDownload(quality)
+
+      const headers = new Headers()
+      headers.set("Content-Type", contentType)
+      headers.set(
+        "Content-Disposition",
+        `attachment; filename="wallpaper.${ext}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+      )
+      headers.set("Content-Length", String(buffer.length))
+      headers.set("X-Wallpaper-Quality", quality)
+      if (authExpired) headers.set("X-Auth-Expired", "1")
+
+      return new NextResponse(new Uint8Array(buffer), { status: 200, headers })
+    } finally {
+      // 释放槽位：下一张排队中的下载立即开始
+      dlSlots.release()
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    // 排队超时（罕见：前一批占满 8 分钟）：给出可重试的明确提示
+    if (msg.startsWith("DOWNLOAD_QUEUE_TIMEOUT")) {
+      const secs = msg.split(":")[1] ?? "?"
       return NextResponse.json(
-        { error: `原图下载失败（HTTP ${upstream.status}）` },
-        { status: 502 }
+        { error: `下载排队超过 ${secs} 秒，请稍后重试` },
+        { status: 503 }
       )
     }
-
-    await recordDownload(quality)
-
-    const headers = new Headers()
-    headers.set("Content-Type", upstream.headers.get("content-type") ?? "application/octet-stream")
-    headers.set(
-      "Content-Disposition",
-      `attachment; filename="wallpaper.${ext}"; filename*=UTF-8''${encodeURIComponent(filename)}`
-    )
-    headers.set("X-Wallpaper-Quality", quality)
-    if (authExpired) headers.set("X-Auth-Expired", "1")
-    const len = upstream.headers.get("content-length")
-    if (len) headers.set("Content-Length", len)
-
-    return new NextResponse(upstream.body, { status: 200, headers })
-  } catch (e) {
     console.error("GET /api/wallpapers/download error:", e)
     return NextResponse.json({ error: "原图下载失败，请稍后重试" }, { status: 502 })
   }
