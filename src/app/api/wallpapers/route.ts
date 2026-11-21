@@ -1,100 +1,94 @@
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
-import { fetchWallpapers, findCategory, PAGE_SIZE } from "@/lib/zhefeng"
-
+import { fetchWallpapers, findCategory, scanSourcePages, PAGE_SIZE } from "@/lib/zhefeng"
 
 /**
- * GET /api/wallpapers?cat=<key>&page=<n>&hideDownloaded=1
- * 壁纸工坊主数据源：从哲风壁纸（haowallpaper.com）实时抓取。
- * 屏蔽过的壁纸永久过滤（不受 hideDownloaded 影响）；
- * hideDownloaded=1 时再过滤掉已下载的壁纸，并自动向后补抓源站页面填满一页。
+ * GET /api/wallpapers?cat=<key>&cursor=<n>&hideDownloaded=1&fresh=1
+ *
+ * v1.4.5 修复（根治「图片经常不显示 / 刷新没用」）：
+ * 旧逻辑每个 app 页只扫源站 page..page+3 共 4 页（48 张）。下载记录一多
+ * （如 183 张已下载 + 26 张屏蔽），第一页被整页过滤 → 返回空列表，
+ * 客户端 hasMore 又被「items.length > 0」误杀 → 无限滚动永久卡死，
+ * v1.4.4 的刷新按钮重抓第 1 页依旧全被过滤 → 看起来毫无作用。
+ *
+ * 新逻辑（游标深度扫描）：
+ * - cursor：从源站第几页开始扫（0/缺省 = 从第 1 页）
+ * - 每 4 页一组并行向前扫，直到收满 12 张未过滤壁纸 / 源站到底 / 单轮 40 页上限
+ * - 返回 nextCursor：客户端下次带着它继续扫，不重复扫描、不会卡死
+ * - hasMore 只由「源站是否到底」决定，与本次收集到几张无关
+ *
+ * v1.4.6：fresh=1（手动刷新）绕过页缓存直接回源，
+ * 确保刷新能拿到源站刚刚更新的内容（旧版 10 分钟内刷新命中缓存）。
  */
 export async function GET(req: NextRequest) {
-  const catKey = req.nextUrl.searchParams.get("cat") ?? "recommend"
-  const page = Math.max(1, Number(req.nextUrl.searchParams.get("page")) || 1)
+  const catKey = req.nextUrl.searchParams.get("cat") ?? "desktop"
+  const cursor = Math.max(0, Number(req.nextUrl.searchParams.get("cursor")) || 0)
   const hideDownloaded =
     req.nextUrl.searchParams.get("hideDownloaded") === "0" ? false : true
+  const fresh = req.nextUrl.searchParams.get("fresh") === "1"
 
   try {
     const cat = findCategory(catKey)
     const blockedCount = await db.blocked.count()
+    const downloadedCount = await db.download.count()
 
+    // 不隐藏已下载：只过滤屏蔽项，一页就是一页（无深度扫描必要）
     if (!hideDownloaded) {
-      // 显示已下载，但屏蔽过的仍然永久过滤
-      let items = await fetchWallpapers(cat, page)
-      const ids = items.map((w) => w.id)
-      if (ids.length) {
-        const blockedIds = new Set(
-          (await db.blocked.findMany({ where: { wtId: { in: ids } }, select: { wtId: true } })).map(
-            (b) => b.wtId
-          )
-        )
-        items = items.filter((w) => !blockedIds.has(w.id))
-      }
-      const downloadedCount = await db.download.count()
+      const batch = await fetchWallpapers(cat, Math.max(1, cursor || 1), { fresh })
+      const ids = batch.map((w) => w.id)
+      const blockedIds = new Set(
+        ids.length
+          ? (
+              await db.blocked.findMany({ where: { id: { in: ids } }, select: { id: true } })
+            ).map((b) => b.id)
+          : []
+      )
+      const items = batch.filter((w) => !blockedIds.has(w.id))
       return NextResponse.json(
-        { category: cat.name, wpType: cat.wpType, page, pageSize: PAGE_SIZE, hasMore: items.length > 0, items, downloadedCount, blockedCount },
+        {
+          category: cat.name,
+          wpType: cat.wpType,
+          items,
+          // 到底判定只看源站，与过滤后剩几张无关
+          hasMore: batch.length > 0,
+          nextCursor: batch.length > 0 ? Math.max(1, cursor || 1) + 1 : 0,
+          skipped: batch.length - items.length,
+          downloadedCount,
+          blockedCount,
+        },
         { headers: { "Cache-Control": "no-store" } }
       )
     }
 
-    // 过滤已下载 + 已屏蔽：从当前页向后最多多抓 3 页源站数据补齐
-    const MAX_LOOKAHEAD = 3
-    let sourcePage = page
-    let collected = 0
-    let hidden = 0
-    let sourceHasMore = true
-    const items = []
+    // 隐藏已下载 + 屏蔽：游标深度扫描
+    const startPage = Math.max(1, cursor || 1)
+    const downloadedIds = new Set(
+      (await db.download.findMany({ select: { id: true } })).map((d) => d.id)
+    )
+    const blockedIds = new Set(
+      (await db.blocked.findMany({ select: { id: true } })).map((b) => b.id)
+    )
 
-    while (collected < PAGE_SIZE && sourcePage <= page + MAX_LOOKAHEAD && sourceHasMore) {
-      const batch = await fetchWallpapers(cat, sourcePage)
-      if (batch.length === 0) {
-        sourceHasMore = false
-        break
-      }
-      if (batch.length < PAGE_SIZE) sourceHasMore = false
-
-      const ids = batch.map((w) => w.id)
-      const excluded = new Set<string>()
-      if (ids.length) {
-        const rows = await db.download.findMany({
-          where: { wtId: { in: ids } },
-          select: { wtId: true },
-        })
-        for (const r of rows) excluded.add(r.wtId)
-        const blockedRows = await db.blocked.findMany({
-          where: { wtId: { in: ids } },
-          select: { wtId: true },
-        })
-        for (const r of blockedRows) excluded.add(r.wtId)
-      }
-
-      for (const w of batch) {
-        if (excluded.has(w.id)) {
-          hidden += 1
-          continue
-        }
-        if (collected < PAGE_SIZE) {
-          items.push(w)
-          collected += 1
-        }
-      }
-      sourcePage += 1
-    }
-
-    const downloadedCount = await db.download.count()
+    const scan = await scanSourcePages(
+      cat,
+      startPage,
+      PAGE_SIZE,
+      (w) => !downloadedIds.has(w.id) && !blockedIds.has(w.id),
+      40,
+      { fresh }
+    )
 
     return NextResponse.json(
       {
         category: cat.name,
         wpType: cat.wpType,
-        page,
-        pageSize: PAGE_SIZE,
-        hasMore: sourceHasMore || collected >= PAGE_SIZE,
-        hidden,
+        items: scan.items,
+        hasMore: scan.sourceHasMore,
+        nextCursor: scan.nextCursor,
+        skipped: scan.skipped,
+        scannedPages: scan.scannedPages,
         downloadedCount,
         blockedCount,
-        items,
       },
       { headers: { "Cache-Control": "no-store" } }
     )

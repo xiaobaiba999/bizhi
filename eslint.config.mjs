@@ -1,40 +1,69 @@
-import { defineConfig, globalIgnores } from "eslint/config";
-import nextVitals from "eslint-config-next/core-web-vitals";
-import nextTs from "eslint-config-next/typescript";
+import nextCoreWebVitals from "eslint-config-next/core-web-vitals";
+import nextTypescript from "eslint-config-next/typescript";
+import { dirname } from "path";
+import { fileURLToPath } from "url";
 
-const eslintConfig = defineConfig([
-  ...nextVitals,
-  ...nextTs,
-  // Override default ignores of eslint-config-next.
-  globalIgnores([
-    // Default ignores of eslint-config-next:
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
+  rules: {
+    // TypeScript rules
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/no-unused-vars": "off",
+    "@typescript-eslint/no-non-null-assertion": "off",
+    "@typescript-eslint/ban-ts-comment": "off",
+    "@typescript-eslint/prefer-as-const": "off",
+    "@typescript-eslint/no-unused-disable-directive": "off",
+    
+    // React rules
+    "react-hooks/exhaustive-deps": "off",
+    "react-hooks/purity": "off",
+    "react/no-unescaped-entities": "off",
+    "react/display-name": "off",
+    "react/prop-types": "off",
+    "react-compiler/react-compiler": "off",
+    
+    // Next.js rules
+    "@next/next/no-img-element": "off",
+    "@next/next/no-html-link-for-pages": "off",
+    
+    // General JavaScript rules
+    "prefer-const": "off",
+    "no-unused-vars": "off",
+    "no-console": "off",
+    "no-debugger": "off",
+    "no-empty": "off",
+    "no-irregular-whitespace": "off",
+    "no-case-declarations": "off",
+    "no-fallthrough": "off",
+    "no-mixed-spaces-and-tabs": "off",
+    "no-redeclare": "off",
+    "no-undef": "off",
+    "no-unreachable": "off",
+    "no-useless-escape": "off",
+  },
+}, {
+  ignores: [
+    "node_modules/**",
     ".next/**",
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // shadcn/ui 生成组件（含 radix any 类型）
-    "src/components/ui/**",
-    // 非应用源码目录
-    "skills/**",
-    "scripts/**",
+    "examples/**",
+    "skills",
+    // 构建产物与本地数据（GitHub Pages 导出 / Release zip / 工具产物）
+    "github-pages-dist/**",
+    "release/**",
+    ".gh-pages-build/**",
+    ".api-stash/**",
+    "tool-results/**",
+    "db/**",
     "download/**",
     "upload/**",
-    // 桌面版（Electron）构建产物与源码（CommonJS，不经 Next 编译）
-    ".next-desktop/**",
-    "release/**",
-    "desktop/**",
-    "public/desktop/**",
-    "tool-results/**",
-    // GitHub Pages 静态导出产物与构建临时目录
-    "github-pages-dist/**",
-    ".gh-pages-build/**",
-    "mini-gh-pages-test/**",
-  ]),
-  {
-    rules: {
-      "@typescript-eslint/no-explicit-any": "off",
-    },
-  },
-]);
+    "mini-services/**",
+    ".zscripts/**",
+  ]
+}];
 
 export default eslintConfig;

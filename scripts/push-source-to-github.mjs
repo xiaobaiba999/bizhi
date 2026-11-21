@@ -7,12 +7,9 @@
  *
  * 与 deploy-to-github.mjs 同理：沙箱 git push 通道被阻断，改走 Git Data API
  * （blob → tree 整树替换 → commit → ref）。排除所有构建产物与本地数据：
- * node_modules / .next* / release / github-pages-dist / download / db /
- * public/desktop（174MB 安装包）/ public/*.zip / upload / tool-results /
- * skills / mini-services / dev.log / .env 等。
- *
- * 安装包不上传到分支（Git blob 单文件上限 100MB）——改由 GitHub Release
- * 资产托管（releases 单文件上限 2GB），见 GITHUB_DEPLOY.md。
+ * node_modules / .next* / .gh-pages-build / github-pages-dist / release /
+ * download / db / upload / tool-results / skills / mini-services / examples /
+ * tests / .zscripts / dev.log / .env 等。
  *
  * 用法（项目根目录执行）：
  *   node scripts/push-source-to-github.mjs <token>
@@ -100,25 +97,24 @@ const ROOT_FILES = [
   "next-env.d.ts",
   "next.config.ts",
   "tsconfig.json",
-  "electron-builder.yml",
+  "postcss.config.mjs",
   "components.json",
   "eslint.config.mjs",
+  "tailwind.config.ts",
   "README.md",
   "GITHUB_DEPLOY.md",
-  "AGENTS.md",
   ".gitignore",
 ];
 
 /** 纳入源码分支的目录（递归全收） */
-const ROOT_DIRS = ["src", "scripts", "desktop", "prisma", "build"];
+const ROOT_DIRS = ["src", "scripts", "prisma"];
 
-/** public/ 特殊处理：排除 desktop/（安装包目录）与 *.zip（网页版压缩包，构建产物） */
+/** public/ 全收（本项目 public 只有 logo.svg / robots.txt，无构建产物） */
 function collectPublic(out) {
   const dir = path.join(ROOT, "public");
   if (!fs.existsSync(dir)) return;
   const walk = (d, rel) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      if (e.name === "desktop") continue; // 安装包目录不入源码分支
       const full = path.join(d, e.name);
       const relPath = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) walk(full, relPath);
@@ -194,7 +190,7 @@ async function main() {
 
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
   const commit = await apiRetry("POST", `/repos/${OWNER}/${REPO}/git/commits`, {
-    message: `source: 壁纸工坊完整源码快照（${stamp} UTC，${files.length} 文件）`,
+    message: `source: 壁纸工坊 v1.4.6 完整源码快照（${stamp} UTC，${files.length} 文件）`,
     tree: tree.data.sha,
     ...(parentSha ? { parents: [parentSha] } : {}),
   });

@@ -1,6 +1,5 @@
 generator client {
-  provider      = "prisma-client-js"
-  binaryTargets = ["native", "windows"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -8,29 +7,22 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 哲风壁纸登录令牌（仅保存在本地数据库，用于下载原图鉴权）
-model ZfToken {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  note      String   // 来源说明：manual(手动粘贴) | qrcode(扫码登录)
+/// 下载记录：下载过的壁纸自动隐藏（「隐藏已下载」开启时）
+model Download {
+  /// 壁纸文件 id（CDN 文件名去扩展名，唯一键）
+  id        String   @id
+  title     String
+  src       String
+  wtId      String?
   createdAt DateTime @default(now())
 }
 
-// 已下载壁纸记录（下载过的图片不再出现在壁纸列表中）
-model Download {
-  id           String   @id @default(cuid())
-  wtId         String   @unique // 哲风壁纸图片 id（CDN 文件名去扩展名）
-  title        String
-  src          String
-  quality      String   @default("preview") // preview(预览质量) | original(令牌高清原图)
-  downloadedAt DateTime @default(now())
-}
-
-// 屏蔽壁纸记录（屏蔽过的图片永久不再出现，跨版本保留在用户数据目录）
+/// 屏蔽记录：屏蔽过的壁纸永久不再显示
 model Blocked {
-  id        String   @id @default(cuid())
-  wtId      String   @unique // 哲风壁纸图片 id（CDN 文件名去扩展名，与列表过滤一致）
+  /// 壁纸文件 id（CDN 文件名去扩展名，唯一键）
+  id        String   @id
   title     String
   src       String
-  blockedAt DateTime @default(now())
+  wtId      String?
+  createdAt DateTime @default(now())
 }

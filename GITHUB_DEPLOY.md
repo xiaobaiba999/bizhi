@@ -7,7 +7,7 @@
 | `main` | 网页静态版（GitHub Pages 站点） | `scripts/build-gh-pages.mjs` + `scripts/deploy-to-github.mjs` |
 | `source` | 完整源码备份（开发快照） | `scripts/push-source-to-github.mjs` |
 
-安装包（~170MB）超仓库 blob 单文件 100MB 上限，托管在 **Release 附件**（上限 2GB，自带 CDN 直链）。
+Release 附件托管网页版离线压缩包（`WallpaperWorkshop-Web-v<版本>.zip`）。
 
 ## 为什么走 REST API 而不是 git push
 
@@ -15,27 +15,26 @@
 git-receive-pack 通道（`git push`）会被挂起阻断。因此全部改走 Git Data API：
 逐文件建 blob → 建整棵 tree（不带 base_tree = 镜像替换）→ 建 commit → 推分支。
 
-## 发布新版本完整流程（三步）
+## 发布新版本完整流程（四步）
 
 ```bash
-# 0. 前置：bun run desktop:win 产出 release/壁纸工坊-Setup-<版本>.exe
-#    （token 三种给法：命令行参数 / env GITHUB_TOKEN / ~/.bizhi-token 文件）
-
-# ① 网页静态版 → main 分支（GitHub Pages）
+# ① 构建静态站（basePath 必须是 /bizhi）：
+#    产出 github-pages-dist/ 与 release/WallpaperWorkshop-Web-v<版本>.zip
 node scripts/build-gh-pages.mjs /bizhi
+
+# ② 网页静态版 → main 分支（GitHub Pages）
 node scripts/deploy-to-github.mjs <token>
 
-# ② 完整源码 → source 分支
+# ③ 完整源码 → source 分支
 node scripts/push-source-to-github.mjs <token>
 
-# ③ 安装包 → Release 附件（tag v<版本>，附件名 ASCII）
+# ④ Release：建 v<版本> tag + 上传 zip 附件 + 写发布说明
 node scripts/upload-release-to-github.mjs <token>
 ```
 
-站点地址：`https://xiaobaiba999.github.io/bizhi/`
+（token 三种给法：命令行参数 / env `GITHUB_TOKEN` / `~/.bizhi-token` 文件）
 
-网页版下载按钮指向 Release 附件直链（`src/lib/version.ts` 的 `RELEASE_SETUP_URL`），
-上传后自动与 Release 保持一致。
+站点地址：`https://xiaobaiba999.github.io/bizhi/`
 
 ## token 权限要求（二选一）
 
@@ -49,6 +48,9 @@ node scripts/upload-release-to-github.mjs <token>
 
 - **Pages 打不开**：仓库 Settings → Pages → Deploy from a branch → `main` / (root)，
   首次构建约 1-2 分钟。
-- **Release 上传慢/失败**：170MB 走 `uploads.github.com`，脚本内置 3 次整档重试；
-  持续失败多为本地带宽，重跑即可（脚本会先清理同名旧附件再传，不重复）。
-- **沙箱内 git remote 推送**：不可用（通道阻断），永远用上面三个脚本。
+- **附件上传失败**：脚本内置 3 次整档重试；持续失败多为本地带宽，重跑即可
+  （脚本会先清理同名旧附件再传，不重复）。
+- **沙箱内 git remote 推送**：不可用（通道阻断），永远用上面四个脚本。
+- **静态版与服务器版差异**：静态版无 `/api`（浏览器直连源站 + localStorage
+  记录）；服务器版有图片代理与 SQLite 记录。功能逻辑共用同一实现
+  （见 `src/lib/workshop-source.ts`）。

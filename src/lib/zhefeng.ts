@@ -1,7 +1,10 @@
 /**
  * 哲风壁纸（haowallpaper.com）数据源
- * 服务端抓取 /homeView 页面并解析出结构化壁纸列表。
- * 壁纸工坊主页面展示的数据全部来自该站点。
+ * 服务端 / 浏览器（静态导出）双端抓取 /homeView 页面并解析出结构化壁纸列表。
+ *
+ * v1.4.6 优化要点（本文件）：
+ * - fetchWallpapers / scanSourcePages 支持 fresh 选项：手动刷新时绕过
+ *   10 分钟内存缓存直接回源，确保能拿到源站刚刚更新的内容
  */
 
 const API_BASE = "https://haowallpaper.com"
@@ -13,7 +16,7 @@ const UA =
 export interface ZhefengWallpaper {
   /** 图片文件 id（CDN 文件名去扩展名，与官网详情 id 一致） */
   id: string
-  /** 壁纸详情 id（卡片 /homeViewLook/<id> 链接，getCompleteUrl 必须用它而非文件 id） */
+  /** 壁纸详情 id（卡片 /homeViewLook/<id> 链接） */
   wtId: string
   /** 清洗后的标题（去掉「哲风壁纸」后缀） */
   title: string
@@ -34,7 +37,7 @@ export interface ZhefengCategory {
   wpType: 1 | 2
 }
 
-/** 分类导航：仅保留 电脑壁纸 / 手机壁纸 两类（wpType 决定源站返回的壁纸类型） */
+/** 分类导航：仅保留 电脑壁纸 / 手机壁纸 两类 */
 export const ZHEFENG_CATEGORIES: ZhefengCategory[] = [
   { key: "desktop", name: "电脑壁纸", typeId: "", wpType: 1 },
   { key: "phone", name: "手机壁纸", typeId: "", wpType: 2 },
@@ -69,29 +72,6 @@ export function proxyImageUrl(src: string): string {
   return `/api/wallpapers/img?src=${encodeURIComponent(src)}`
 }
 
-/**
- * <img> 加载失败自动回退原图（缩略变体 404 / 网络抖动）。
- * 首次失败换原图（两种模式都过 proxyImageUrl，静态直连 / 服务器代理各自正确）；
- * 二次失败追加 r=1 破缓存重试一次。
- * 用法：onError={imgFallback(w.src)}
- * v1.4.3：网格/面板已改用 WallpaperImage 组件（完整回退链 + 占位骨架），
- * 此函数仅保留给预览弹窗等直连原图场景。
- */
-export function imgFallback(originalSrc: string) {
-  return (e: { currentTarget: HTMLImageElement }) => {
-    const el = e.currentTarget
-    if (el.dataset.wwOriginal === "1") {
-      if (!el.dataset.wwRetried) {
-        el.dataset.wwRetried = "1"
-        el.src = `${el.src}${el.src.includes("?") ? "&" : "?"}r=1`
-      }
-      return
-    }
-    el.dataset.wwOriginal = "1"
-    el.src = proxyImageUrl(originalSrc)
-  }
-}
-
 /** 原图 URL 的 s240 缩略变体（srcset 缺失时源站实际存在的兜底缩略图） */
 export function s240VariantOf(src: string): string {
   const dot = src.lastIndexOf(".")
@@ -100,8 +80,7 @@ export function s240VariantOf(src: string): string {
 
 /**
  * 网格显示回退链：缩略图 → s240 兜底缩略图 → 原图（去重保序）。
- * 之前缩略图 404 直接跳原图（2K/4K 巨图当缩略图加载 → 「部分图片显示太慢」的元凶），
- * 现在先落到真实存在的 s240 小图，只有全部失败才用原图兜底。
+ * 缩略图 404 / 网络抖动时逐级回退，全部失败才用原图兜底。
  */
 export function displayFallbackChain(w: { thumb: string; src: string }): string[] {
   return Array.from(new Set([w.thumb, s240VariantOf(w.src), w.src].filter(Boolean)))
@@ -139,16 +118,13 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
     const src = imgMatch[1]
     const alt = imgMatch[2]
 
-    // 图片 id（文件 id：下载记录的键，与图片直链一一对应）
     const dot = src.lastIndexOf(".")
     if (dot === -1) continue
     const id = src.slice(src.lastIndexOf("/") + 1, dot)
     if (seen.has(id)) continue
     seen.add(id)
 
-    // 壁纸详情 id（卡片内 /homeViewLook/<id> 链接）。
-    // 官网 getCompleteUrl 必须用这个 id（它与文件 id 是两个不同的数字），
-    // 否则返回 305 [错误的请求 -> 3005]；缺失时回退文件 id
+    // 壁纸详情 id（卡片内 /homeViewLook/<id> 链接），缺失时回退文件 id
     const lookMatch = /href="\/homeViewLook\/([0-9]{6,32})"/.exec(chunk)
     const wtId = lookMatch ? lookMatch[1] : id
 
@@ -201,17 +177,22 @@ const cache = new Map<string, CacheEntry>()
 const CACHE_TTL = 10 * 60 * 1000
 
 /**
- * 抓取哲风壁纸某个分类的一页壁纸。
+ * 抓取哲风壁纸某个分类的一页壁纸（10 分钟 TTL 内存缓存 + 一次快速重试）。
+ * 浏览器（静态版）与服务端（代理版）共用：浏览器会忽略受限请求头，不影响抓取。
  * @param cat 分类配置
  * @param page 页码（从 1 开始）
+ * @param opts.fresh true = 绕过缓存读直接回源（手动刷新用；结果仍写回缓存）
  */
 export async function fetchWallpapers(
   cat: ZhefengCategory,
-  page: number
+  page: number,
+  opts?: { fresh?: boolean }
 ): Promise<ZhefengWallpaper[]> {
   const key = `${cat.key}|${page}`
-  const hit = cache.get(key)
-  if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.items
+  if (!opts?.fresh) {
+    const hit = cache.get(key)
+    if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.items
+  }
 
   const params = new URLSearchParams({
     page: String(page),
@@ -221,11 +202,21 @@ export async function fetchWallpapers(
   })
   if (cat.typeId) params.set("typeId", cat.typeId)
 
-  const res = await fetch(`${API_BASE}/homeView?${params.toString()}`, {
-    headers: { "User-Agent": UA, Referer: `${API_BASE}/` },
-    signal: AbortSignal.timeout(15000),
-    cache: "no-store",
-  })
+  const doFetch = () =>
+    fetch(`${API_BASE}/homeView?${params.toString()}`, {
+      headers: { "User-Agent": UA, Referer: `${API_BASE}/` },
+      signal: AbortSignal.timeout(15000),
+      cache: "no-store",
+    })
+
+  let res: Response
+  try {
+    res = await doFetch()
+  } catch {
+    // 网络抖动 / 连接排队超时：隔 1.2s 重试一次
+    await new Promise((r) => setTimeout(r, 1200))
+    res = await doFetch()
+  }
   if (!res.ok) throw new Error(`源站响应异常（HTTP ${res.status}）`)
 
   const html = await res.text()
@@ -234,7 +225,98 @@ export async function fetchWallpapers(
   return items
 }
 
-/** 下载原图时回源使用的请求头 */
+/* --------------------- v1.4.5 核心：游标深度扫描 --------------------- */
+
+export interface ScanResult {
+  /** 过滤后收集到的壁纸（最多 limit 张） */
+  items: ZhefengWallpaper[]
+  /** 下一轮扫描应从源站第几页开始（0 = 源站已到底） */
+  nextCursor: number
+  /** 源站是否还有更多内容 */
+  sourceHasMore: boolean
+  /** 本轮扫描中被过滤（已下载/已屏蔽）的张数 */
+  skipped: number
+  /** 本轮实际扫描的源站页数 */
+  scannedPages: number
+}
+
+/**
+ * 从 startPage 起按 4 页一组「并行」向前扫描源站，直到：
+ * - 收满 limit 张未过滤壁纸；或
+ * - 源站到底（空页 / 短页）；或
+ * - 达到单轮扫描页数上限 maxPages（防极端情况无限扫描）。
+ *
+ * 这是「下载了一两百张后整页被过滤、刷新也没用」的根治方案：
+ * 旧逻辑每轮只看 4 页（48 张），一旦连续过滤超过 48 张就返回空列表，
+ * 客户端 hasMore 又被误杀成 false，滚动彻底卡死。
+ * 现在返回 nextCursor 游标，客户端拿着游标继续扫，永远能扫到未下载的内容。
+ *
+ * @param keep 过滤谓词：返回 true 的壁纸才会被收集
+ * @param opts.fresh true = 绕过页缓存直接回源（手动刷新时用）
+ */
+export async function scanSourcePages(
+  cat: ZhefengCategory,
+  startPage: number,
+  limit: number,
+  keep: (w: ZhefengWallpaper) => boolean,
+  maxPages = 40,
+  opts?: { fresh?: boolean }
+): Promise<ScanResult> {
+  const items: ZhefengWallpaper[] = []
+  const seen = new Set<string>()
+  let skipped = 0
+  let scannedPages = 0
+  let sourceHasMore = true
+  let page = Math.max(1, startPage)
+
+  while (items.length < limit && scannedPages < maxPages && sourceHasMore) {
+    // 4 页一组并行抓取：单页 ~300ms，并行后扫描 40 页也只要几秒
+    const batchSize = Math.min(4, maxPages - scannedPages)
+    const batch = await Promise.allSettled(
+      Array.from({ length: batchSize }, (_, i) => fetchWallpapers(cat, page + i, opts))
+    )
+
+    let gotAny = false
+    let shortPage = false
+    for (const r of batch) {
+      if (r.status !== "fulfilled") continue // 单页失败：组内其余页照常处理
+      gotAny = true
+      scannedPages += 1
+      if (r.value.length === 0) {
+        sourceHasMore = false // 空页 = 源站到底
+        break
+      }
+      if (r.value.length < PAGE_SIZE) shortPage = true
+      for (const w of r.value) {
+        if (seen.has(w.id)) continue
+        seen.add(w.id)
+        if (!keep(w)) {
+          skipped += 1
+          continue
+        }
+        if (items.length < limit) items.push(w)
+      }
+      if (items.length >= limit) break
+    }
+    if (!gotAny) {
+      // 整组失败（网络问题）：抛出让上层重试，而不是误判「到底」
+      throw new Error("源站暂时无法访问，请稍后重试")
+    }
+    if (shortPage && items.length < limit) sourceHasMore = false
+    if (!sourceHasMore) break
+    page += batchSize
+  }
+
+  return {
+    items,
+    nextCursor: sourceHasMore ? page : 0,
+    sourceHasMore,
+    skipped,
+    scannedPages,
+  }
+}
+
+/** 下载原图 / 回源代理时使用的请求头 */
 export const upstreamHeaders = () => ({
   "User-Agent": UA,
   Referer: `${API_BASE}/`,

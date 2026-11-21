@@ -2,19 +2,25 @@
  * 壁纸工坊 · UI 数据层（服务器 / 静态双模式自动适配）
  *
  * 一套代码两种运行环境：
- * - server：沙箱 dev / Electron 桌面版 / 网页服务器版 —— 走 /api/*（服务端抓取 + SQLite 记录）
+ * - server：dev / 桌面版 / 网页服务器版 —— 走 /api/*（服务端抓取 + SQLite 记录）
  * - static：GitHub Pages 等纯静态托管 —— 浏览器直连哲风源站抓取解析
- *   （源站 CORS 全开 access-control-allow-origin: *，实测可跨域读取 HTML；
- *   图片直连 CDN，页面全局 no-referrer 绕过防盗链），
+ *   （源站 CORS 全开；图片直连 CDN，页面全局 no-referrer 绕过防盗链），
  *   下载记录 / 屏蔽记录走 localStorage（download-store / block-store）。
  *
- * 模式判定：构建期注入（NEXT_PUBLIC_STATIC_EXPORT，仅静态导出构建为 "1"）。
- * dev / 桌面 standalone 构建无此变量 → 服务器模式，恒定无闪烁。
+ * v1.4.5 核心修复（游标分页，根治「图片经常不显示 / 刷新没用」）：
+ * - loadWallpaperPage 改为「游标」驱动：返回 nextCursor，下次从它继续扫，
+ *   不再依赖 app 页码 = 源站页码的旧映射（旧映射每页只看 4 页源站，
+ *   下载一多整页被过滤 → 空列表 → 滚动卡死、刷新也没用）
+ * - 两种模式共用 scanSourcePages 深度扫描（4 页一组并行，最多 40 页/轮）
+ * - hasMore 只由「源站是否到底」决定，绝不因「本次收集 0 张」而终止
+ *
+ * v1.4.6：loadWallpaperPage 增加 fresh 选项（手动刷新绕过页缓存直接回源）
  */
 
 import {
   fetchWallpapers,
   findCategory,
+  scanSourcePages,
   PAGE_SIZE,
   type ZhefengWallpaper,
 } from "@/lib/zhefeng"
@@ -30,7 +36,6 @@ import {
   clearLocalBlocked,
   countLocalBlocked,
 } from "@/lib/block-store"
-import type { FsDirHandleLike } from "@/lib/web-download-dir"
 
 /** 静态导出构建标记（next.config env 注入；客户端包构建期固化） */
 export const IS_STATIC_EXPORT = process.env.NEXT_PUBLIC_STATIC_EXPORT === "1"
@@ -38,29 +43,37 @@ export const IS_STATIC_EXPORT = process.env.NEXT_PUBLIC_STATIC_EXPORT === "1"
 /** 一页数据（两种模式统一形状，与 /api/wallpapers 响应对齐） */
 export interface WallpaperPage {
   items: ZhefengWallpaper[]
+  /** 源站是否还有更多（与本次收集几张无关） */
   hasMore: boolean
+  /** 下一轮扫描从源站第几页开始（0 = 到底） */
+  nextCursor: number
+  /** 本轮跳过的已下载/已屏蔽张数（刷新反馈用） */
+  skipped: number
   downloadedCount: number
   blockedCount: number
 }
 
 /**
- * 加载某个分类的一页壁纸（含屏蔽永久过滤 + 「隐藏已下载」过滤与自动补抓）。
- * server 模式复用 API（服务端 lookahead 过滤）；
- * static 模式在浏览器内抓源站页面 + localStorage 过滤，逻辑与 API 完全对齐：
- * - 屏蔽过的无条件过滤（不受 hideDownloaded 影响）
- * - hideDownloaded 时已下载的一并过滤，从当前源站页向后最多补抓 3 页填满一页
- * - 终点判定：源站空页才算结束（手机壁纸每页张数与 PAGE_SIZE 不必相等，不能用「页内 <12」判终点）
+ * 加载一页壁纸（游标驱动）。
+ * @param catKey 分类
+ * @param cursor 从源站第几页开始扫（0 = 从第 1 页；上轮返回的 nextCursor）
+ * @param hideDownloaded 是否过滤已下载
+ * @param opts.fresh true = 绕过页缓存直接回源（手动刷新时用）
  */
 export async function loadWallpaperPage(
   catKey: string,
-  page: number,
-  hideDownloaded: boolean
+  cursor: number,
+  hideDownloaded: boolean,
+  opts?: { fresh?: boolean }
 ): Promise<WallpaperPage> {
-  const page_ = Math.max(1, page)
+  const startPage = Math.max(1, cursor || 1)
+  const fresh = opts?.fresh === true
 
   if (!IS_STATIC_EXPORT) {
     const res = await fetch(
-      `/api/wallpapers?cat=${encodeURIComponent(catKey)}&page=${page_}&hideDownloaded=${hideDownloaded ? 1 : 0}`,
+      `/api/wallpapers?cat=${encodeURIComponent(catKey)}&cursor=${startPage}&hideDownloaded=${
+        hideDownloaded ? 1 : 0
+      }${fresh ? "&fresh=1" : ""}`,
       { cache: "no-store" }
     )
     if (!res.ok) {
@@ -70,12 +83,16 @@ export async function loadWallpaperPage(
     const data = (await res.json()) as {
       items: ZhefengWallpaper[]
       hasMore: boolean
+      nextCursor: number
+      skipped?: number
       downloadedCount?: number
       blockedCount?: number
     }
     return {
       items: data.items,
-      hasMore: data.hasMore && data.items.length > 0,
+      hasMore: data.hasMore,
+      nextCursor: data.nextCursor,
+      skipped: data.skipped ?? 0,
       downloadedCount: data.downloadedCount ?? 0,
       blockedCount: data.blockedCount ?? 0,
     }
@@ -90,39 +107,33 @@ export async function loadWallpaperPage(
 
   if (!hideDownloaded) {
     // 显示已下载，但屏蔽过的仍然永久过滤
-    const batch = await fetchPageWithRetry(cat, page_)
+    const batch = await fetchPageWithRetry(cat, startPage, fresh)
     const items = batch.filter((w) => !blocked.has(w.id))
-    return { items, hasMore: items.length > 0, downloadedCount, blockedCount }
+    return {
+      items,
+      hasMore: batch.length > 0,
+      nextCursor: batch.length > 0 ? startPage + 1 : 0,
+      skipped: batch.length - items.length,
+      downloadedCount,
+      blockedCount,
+    }
   }
 
-  // 过滤已下载 + 已屏蔽：从当前页向后最多多抓 3 页源站数据补齐
-  const MAX_LOOKAHEAD = 3
-  let sourcePage = page_
-  let collected = 0
-  let sourceHasMore = true
-  const items: ZhefengWallpaper[] = []
-
-  while (collected < PAGE_SIZE && sourcePage <= page_ + MAX_LOOKAHEAD && sourceHasMore) {
-    const batch = await fetchPageWithRetry(cat, sourcePage)
-    if (batch.length === 0) {
-      sourceHasMore = false
-      break
-    }
-    if (batch.length < PAGE_SIZE) sourceHasMore = false
-
-    for (const w of batch) {
-      if (blocked.has(w.id) || downloaded.has(w.id)) continue
-      if (collected < PAGE_SIZE) {
-        items.push(w)
-        collected += 1
-      }
-    }
-    sourcePage += 1
-  }
+  // 过滤已下载 + 已屏蔽：游标深度扫描（与服务器端同一实现）
+  const scan = await scanSourcePages(
+    cat,
+    startPage,
+    PAGE_SIZE,
+    (w) => !blocked.has(w.id) && !downloaded.has(w.id),
+    40,
+    { fresh }
+  )
 
   return {
-    items,
-    hasMore: sourceHasMore || collected >= PAGE_SIZE,
+    items: scan.items,
+    hasMore: scan.sourceHasMore,
+    nextCursor: scan.nextCursor,
+    skipped: scan.skipped,
     downloadedCount,
     blockedCount,
   }
@@ -133,12 +144,16 @@ export async function loadWallpaperPage(
  * 快速滚动时大量缩略图流可能把 HTML 分页请求挤到排队超时
  * （AbortSignal 15s）；隔 1.2s 重试一次通常即可成功。
  */
-async function fetchPageWithRetry(cat: Parameters<typeof fetchWallpapers>[0], p: number) {
+async function fetchPageWithRetry(
+  cat: Parameters<typeof fetchWallpapers>[0],
+  p: number,
+  fresh = false
+): Promise<ZhefengWallpaper[]> {
   try {
-    return await fetchWallpapers(cat, p)
+    return await fetchWallpapers(cat, p, { fresh })
   } catch {
     await new Promise((r) => setTimeout(r, 1200))
-    return fetchWallpapers(cat, p)
+    return fetchWallpapers(cat, p, { fresh })
   }
 }
 
@@ -160,12 +175,12 @@ export async function clearAllDownloads(): Promise<void> {
  */
 export async function blockWallpaper(w: ZhefengWallpaper): Promise<number> {
   if (IS_STATIC_EXPORT) {
-    return recordLocalBlock({ id: w.id, wtId: w.wtId || w.id, title: w.title, src: w.src })
+    return recordLocalBlock({ id: w.id, title: w.title, src: w.src })
   }
   const res = await fetch("/api/wallpapers/block", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ src: w.src, title: w.title, wtId: w.wtId || w.id }),
+    body: JSON.stringify({ id: w.id, src: w.src, title: w.title, wtId: w.wtId || w.id }),
   })
   if (!res.ok) throw new Error("屏蔽失败")
   const data = (await res.json().catch(() => ({}))) as { blockedCount?: number }
@@ -205,10 +220,8 @@ function extOfSrc(src: string): string {
 }
 
 /**
- * 静态模式：直连 CDN 取原图 blob（页面全局 no-referrer 绕过防盗链，
- * CDN CORS 全开，跨域可读）。返回待保存字节与推荐文件名；
+ * 静态模式：直连 CDN 取原图 blob。返回待保存字节与推荐文件名；
  * 记录同时写入 localStorage（下载过的自动隐藏）。
- * 与服务器版下载策略一致：原图字节直转存（预览级分辨率，高清原图需令牌的服务端环境）。
  */
 export async function prepareWallpaperBlob(
   w: ZhefengWallpaper
@@ -230,49 +243,4 @@ export function saveBlobViaAnchor(filename: string, blob: Blob) {
   a.click()
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
-}
-
-/**
- * 静态模式经自选目录直写 blob（File System Access）。
- * 成功 true；权限丢失 / 失败 false → 调用方回退浏览器另存。
- */
-export async function saveBlobToDirectory(
-  dir: FsDirHandleLike,
-  filename: string,
-  blob: Blob
-): Promise<boolean> {
-  try {
-    if (dir.queryPermission) {
-      const p = await dir.queryPermission({ mode: "readwrite" })
-      if (p !== "granted" && dir.requestPermission) {
-        const r = await dir.requestPermission({ mode: "readwrite" })
-        if (r !== "granted") return false
-      }
-    }
-    const fh = await dir.getFileHandle(await uniqueFsName(dir, filename), { create: true })
-    const stream = await fh.createWritable()
-    await stream.write(blob)
-    await stream.close()
-    return true
-  } catch (e) {
-    console.warn("[workshop] 静态模式写入自选目录失败，回退浏览器另存:", e)
-    return false
-  }
-}
-
-/** 目录内重名自动追加序号：name (1).ext */
-async function uniqueFsName(dir: FsDirHandleLike, filename: string): Promise<string> {
-  const dot = filename.lastIndexOf(".")
-  const stem = dot === -1 ? filename : filename.slice(0, dot)
-  const ext = dot === -1 ? "" : filename.slice(dot)
-  let candidate = filename
-  for (let i = 0; i < 999; i++) {
-    try {
-      await dir.getFileHandle(candidate, { create: false }) // 已存在 → 试下一个
-      candidate = i === 0 ? `${stem} (1)${ext}` : `${stem} (${i + 1})${ext}`
-    } catch {
-      return candidate // 不存在 → 可用
-    }
-  }
-  return `${stem}-${Date.now()}${ext}`
 }
