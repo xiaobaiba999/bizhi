@@ -23,6 +23,7 @@ import {
 } from "@/lib/zhefeng"
 import {
   IS_STATIC_EXPORT,
+  IS_DESKTOP,
   loadWallpaperPage,
   clearAllDownloads,
   blockWallpaper,
@@ -341,6 +342,13 @@ export function WorkshopTab() {
 
   /** 打开下载说明 */
   const handleOpenDownloads = async () => {
+    if (IS_DESKTOP) {
+      toast.info("壁纸自动保存到「图片 / WallpaperWorkshop」文件夹", {
+        description: "保存完成后会弹出通知；也可在菜单「文件 → 打开保存文件夹」中查看。",
+        duration: 5000,
+      })
+      return
+    }
     toast.info("壁纸由浏览器保存到「下载」文件夹", {
       description: "浏览器默认保存到系统「下载」文件夹，可在浏览器下载列表中查看。",
       duration: 5000,
@@ -429,7 +437,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.6 优化版
+            v1.4.7 桌面版
           </span>
           <button
             type="button"

@@ -40,6 +40,9 @@ import {
 /** 静态导出构建标记（next.config env 注入；客户端包构建期固化） */
 export const IS_STATIC_EXPORT = process.env.NEXT_PUBLIC_STATIC_EXPORT === "1"
 
+/** 桌面版（Electron）构建标记：下载保存位置等提示文案用 */
+export const IS_DESKTOP = process.env.NEXT_PUBLIC_DESKTOP === "1"
+
 /** 一页数据（两种模式统一形状，与 /api/wallpapers 响应对齐） */
 export interface WallpaperPage {
   items: ZhefengWallpaper[]

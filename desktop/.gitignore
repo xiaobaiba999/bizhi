@@ -1,0 +1,4 @@
+# 依赖与构建产物（renderer 由 scripts/build-desktop.mjs 生成）
+node_modules/
+renderer/
+smoke-desktop.png

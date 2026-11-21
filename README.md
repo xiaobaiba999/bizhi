@@ -1,14 +1,17 @@
-# 壁纸工坊（v1.4.6 优化版）
+# 壁纸工坊（v1.4.7 桌面版）
 
 哲风壁纸实时获取与原图下载工具。Next.js 16 + TypeScript + Tailwind CSS 4 +
-shadcn/ui + Prisma（SQLite）构建，同一套代码支持两种运行形态：
+shadcn/ui + Prisma（SQLite）构建，同一套代码支持三种运行形态：
 
 | 形态 | 说明 | 数据存储 |
 |---|---|---|
 | **服务器版**（默认 dev / `next start`） | 服务端抓取源站 + 图片代理（绕 CDN 防盗链）+ 原图下载代理 | SQLite（Prisma） |
 | **静态网页版**（GitHub Pages） | 浏览器直连哲风源站抓取（源站 CORS 全开），图片直连 CDN（`no-referrer` 绕防盗链） | localStorage |
+| **Windows 桌面版**（Electron，v1.4.7 新增） | 静态版同源渲染层 + `app://` 协议本地加载；下载接管自动保存「图片/WallpaperWorkshop」+ 系统通知 | 应用本地（localStorage，独立于浏览器） |
 
 在线地址：**https://xiaobaiba999.github.io/bizhi/**
+桌面安装包：**[Releases](https://github.com/xiaobaiba999/bizhi/releases)**
+（`WallpaperWorkshop-Setup-v1.4.7.exe`，Windows 10/11 x64）
 
 ## 功能
 
@@ -20,6 +23,7 @@ shadcn/ui + Prisma（SQLite）构建，同一套代码支持两种运行形态�
 - **下载过的自动隐藏**（可临时关闭查看 / 一键清空记录）
 - **屏蔽**：不喜欢的壁纸永久不再显示（可清空恢复）
 - **大图预览**、分辨率徽标、标签展示
+- **v1.4.7**：新增 Windows 桌面安装版（Electron 封装，见下文）
 - **v1.4.6**：刷新强制回源（绕过页缓存）+ 空轮自动续扫至 200 页；
   图片代理对 CDN 永久 404 缩略图负缓存 5 分钟不重试，回退链秒级兜底
 
@@ -37,9 +41,28 @@ bun run lint         # ESLint
 ```bash
 node scripts/build-gh-pages.mjs /bizhi     # ① 构建静态站 → github-pages-dist/ + release/web.zip
 node scripts/deploy-to-github.mjs <token>  # ② 推 main 分支（GitHub Pages）
-node scripts/push-source-to-github.mjs <token> # ③ 推 source 分支（源码快照）
-node scripts/upload-release-to-github.mjs <token> # ④ 建v1.4.6 Release + 上传 zip 附件
+node scripts/push-source-to-github.mjs <token> # ③ 推 source 分支（源码快照，含 desktop/）
+node scripts/upload-release-desktop.mjs <token> # ④ 建 v1.4.7 Release + 上传 exe / zip 附件
 ```
+
+## Windows 桌面版（Electron）
+
+```bash
+node scripts/build-desktop.mjs        # 一条龙：渲染层构建 + NSIS 安装包
+# 或分步：
+node scripts/build-desktop.mjs render  # 只构建渲染层 → desktop/renderer/
+node scripts/build-desktop.mjs dist    # 只打包 → release/desktop/WallpaperWorkshop-Setup-v<版本>.exe
+node scripts/make-desktop-icon.mjs     # 单独重生成图标（desktop/build/icon.ico / icon.png）
+```
+
+要点：
+- 渲染层 = 同一套 Next.js 静态导出（`NEXT_PUBLIC_DESKTOP=1`，无 basePath）
+- 主进程 `desktop/main.js`：`app://` 自定义协议本地加载（origin 稳定，记录持久）、
+  下载接管自动保存 + 系统通知、外链走系统浏览器、窗口状态记忆
+- Linux/macOS 也可构建 Windows 包：脚本自动打补丁用 `UninstallerReader`
+  静态提取卸载程序（免 wine）；Electron / NSIS 工具链走 npmmirror 镜像
+- 本地冒烟：`cd desktop && WW_SMOKE=1 electron .`（xvfb 无头亦可，
+  输出 JSON 报告 + 截图，退出码 0 = 图片正常加载）
 
 详见 [GITHUB_DEPLOY.md](./GITHUB_DEPLOY.md)（沙箱内 git push 通道被阻断，
 全部走 api.github.com REST API）。
@@ -58,7 +81,9 @@ src/
     download-store.ts        # 静态模式下载记录（localStorage）
     block-store.ts           # 静态模式屏蔽记录（localStorage）
 prisma/schema.prisma         # Download / Blocked 两张表
-scripts/                     # GitHub Pages 构建 / 部署 / 源码推送 / Release 上传
+desktop/                     # Electron 桌面版（main.js + package.json + build 图标；
+                             #   renderer/ 为构建产物不入库）
+scripts/                     # GitHub Pages / 桌面版构建 / 部署 / 源码推送 / Release 上传
 ```
 
 ## 数据来源

@@ -26,6 +26,8 @@ const nextConfig: NextConfig = {
         env: {
           NEXT_PUBLIC_BASE_PATH: process.env.GH_BASE_PATH || "",
           NEXT_PUBLIC_STATIC_EXPORT: "1",
+          // 桌面版（Electron）构建标记：下载提示文案等用
+          NEXT_PUBLIC_DESKTOP: process.env.NEXT_PUBLIC_DESKTOP === "1" ? "1" : "",
         },
       }
     : {

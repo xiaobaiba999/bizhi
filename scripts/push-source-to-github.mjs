@@ -109,6 +109,23 @@ const ROOT_FILES = [
 /** 纳入源码分支的目录（递归全收） */
 const ROOT_DIRS = ["src", "scripts", "prisma"];
 
+/** desktop/ 桌面版源码（排除构建产物与依赖：renderer / node_modules 等） */
+const DESKTOP_SKIP = new Set(["node_modules", "renderer", "smoke-desktop.png"]);
+function collectDesktop(out) {
+  const dir = path.join(ROOT, "desktop");
+  if (!fs.existsSync(dir)) return;
+  const walk = (d, rel) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (DESKTOP_SKIP.has(e.name)) continue;
+      const full = path.join(d, e.name);
+      const relPath = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(full, relPath);
+      else out.push({ abs: full, rel: `desktop/${relPath}` });
+    }
+  };
+  walk(dir, "");
+}
+
 /** public/ 全收（本项目 public 只有 logo.svg / robots.txt，无构建产物） */
 function collectPublic(out) {
   const dir = path.join(ROOT, "public");
@@ -145,6 +162,7 @@ function collectFiles() {
     walk(dir, "");
   }
   collectPublic(out);
+  collectDesktop(out);
   return out;
 }
 
