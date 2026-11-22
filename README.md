@@ -8,7 +8,7 @@
 
 除本网页版外，还提供 **Windows 桌面安装版**（Electron，Win10/11 x64）：
 见 **[Releases](https://github.com/xiaobaiba999/bizhi/releases/latest)** 下载
-`WallpaperWorkshop-Setup-v1.4.7.exe`（约 97MB）—— 向导式安装，
+`WallpaperWorkshop-Setup-v1.4.8.exe`（约 97MB）—— 向导式安装，
 壁纸自动保存到「图片 / WallpaperWorkshop」并弹系统通知，记录独立持久。
 
 ## 网页版功能
@@ -27,7 +27,7 @@
 
 见仓库 **[Releases](https://github.com/xiaobaiba999/bizhi/releases)**：
 
-- `WallpaperWorkshop-Web-v1.4.7.zip`（约 0.5MB）—— 本静态网页版的离线压缩包，
+- `WallpaperWorkshop-Web-v1.4.8.zip`（约 0.5MB）—— 本静态网页版的离线压缩包，
   解压后**双击 index.html 即可用**（无需服务器；壁纸加载需联网）
 
 ## 仓库结构
