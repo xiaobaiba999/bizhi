@@ -1,474 +1,288 @@
+/**
+ * 壁纸工坊 · Windows 桌面版主进程（Electron）
+ * ============================================================
+ * 架构：渲染层 = Next.js 静态导出产物（desktop/renderer/，由
+ *       scripts/build-desktop.mjs 构建注入），静态模式直连哲风源站。
+ *
+ * 关键设计：
+ * - app:// 自定义标准协议加载本地渲染层（而非 file://）：
+ *   ① origin 固定为 app://local，localStorage（下载/屏蔽记录）跨次启动稳定
+ *   ② 绝对路径 /_next/... 按 http 语义解析，无需相对路径改写
+ * - 下载接管（will-download）：壁纸自动保存到「图片/WallpaperWorkshop」，
+ *   批量下载不弹对话框；完成弹系统通知，点击通知打开保存文件夹
+ * - 外链（target=_blank）一律走系统默认浏览器，不在应用内开新窗
+ * - 记忆窗口位置与大小（userData/window-state.json）
+ */
+
 "use strict";
 
-/**
- * 壁纸工坊 · 桌面版主进程（Electron）
- *
- * 职责：
- * 1. 以子进程方式内嵌运行 Next.js standalone 服务器（ELECTRON_RUN_AS_NODE）
- * 2. 首次运行时把安装包内置的空数据库模板复制到用户数据目录（%APPDATA%\壁纸工坊）
- *    —— 已存在的数据库只要是有效 SQLite 文件就原样保留，永不因缺表/缺列重建
- *    （缺表缺列由服务端启动时自动修补，见 src/instrumentation.ts）
- * 3. 启动时自恢复「升级护送」的用户数据（安装器崩溃/中断时的兑底，见 build/installer.nsh）
- * 4. 接住网页触发的壁纸下载，自动保存到系统「下载\壁纸工坊」目录（不弹保存框）
- * 5. 外部链接一律交给系统浏览器
- * 6. 卸载说明：安装目录由 NSIS 卸载器清理；用户数据目录（数据库/屏蔽记录）
- *    仅在卸载向导中主动勾选「同时删除应用数据」时才删除 → 正常卸载不丢数据
- */
-
-const { app, BrowserWindow, Menu, shell, session, dialog, Notification, ipcMain } = require("electron");
-const { spawn } = require("node:child_process");
-const path = require("node:path");
+const { app, BrowserWindow, Menu, dialog, Notification, protocol, session, shell } = require("electron");
 const fs = require("node:fs");
-const net = require("node:net");
-const http = require("node:http");
-const os = require("node:os");
+const path = require("node:path");
 
-const IS_DEV = !app.isPackaged;
-const APP_NAME = "壁纸工坊";
-const DEFAULT_PORT = Number(process.env.WF_PORT) || 41723;
-const APP_ID = "com.wallpaperworkshop.app";
+const APP_DIR = __dirname;
+const RENDERER_DIR = path.join(APP_DIR, "renderer");
+const ICON_PNG = path.join(APP_DIR, "build", "icon.png");
+const APP_VERSION = require("./package.json").version;
+const SAVE_DIR_NAME = "WallpaperWorkshop";
+const SMOKE = process.env.WW_SMOKE === "1";
 
-// Linux 容器/root 环境跑冒烟测试需要
-try {
-  if (process.env.WF_NO_SANDBOX === "1" || (process.getuid && process.getuid() === 0)) {
-    app.commandLine.appendSwitch("no-sandbox");
-  }
-  if (process.env.WF_DISABLE_GPU === "1") {
-    app.commandLine.appendSwitch("disable-gpu");
-  }
-} catch {
-  /* ignore */
+// 无头/容器环境（冒烟测试）需要关闭沙箱与 GPU（必须在 ready 前生效）
+if (SMOKE) {
+  app.commandLine.appendSwitch("no-sandbox");
+  app.commandLine.appendSwitch("disable-gpu");
 }
 
-app.setAppUserModelId(APP_ID);
+/* ------------------------------- 小工具 ------------------------------- */
 
-let win = null;
-let serverProc = null;
-let currentPort = DEFAULT_PORT;
-let dbPath = "";
-let quitting = false;
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".txt": "text/plain; charset=utf-8",
+  ".map": "application/json",
+  ".webmanifest": "application/manifest+json",
+};
 
-/* ---------------- 路径与数据库 ---------------- */
+const notFound = () =>
+  new Response("Not Found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
 
-/** Next standalone 服务器目录（WF_SERVER_DIR 可覆盖，便于开发/冒烟测试直接指向打包布局） */
-function serverDir() {
-  if (process.env.WF_SERVER_DIR) return process.env.WF_SERVER_DIR;
-  if (IS_DEV) {
-    return path.join(__dirname, "..", ".next-desktop", "standalone");
-  }
-  return path.join(process.resourcesPath, "app", "server");
-}
-
-/** 用户数据目录（Windows: %APPDATA%\壁纸工坊，卸载时由安装器清理） */
-function dataDir() {
-  return process.env.WF_DATA_DIR || app.getPath("userData");
-}
-
-/* ---------------- 设置持久化（自选下载位置等） ---------------- */
-
-function settingsPath() {
-  return path.join(dataDir(), "settings.json");
-}
-
-function readSettings() {
-  try {
-    return JSON.parse(fs.readFileSync(settingsPath(), "utf8")) || {};
-  } catch {
-    return {};
-  }
-}
-
-function writeSettings(obj) {
-  try {
-    fs.mkdirSync(dataDir(), { recursive: true });
-    fs.writeFileSync(settingsPath(), JSON.stringify(obj, null, 2));
-  } catch (e) {
-    console.error("[desktop] 写入设置失败:", e);
-  }
-}
-
-/** 用户自选的下载目录（未设置返回 null） */
-function chosenDownloadDir() {
-  const dir = readSettings().downloadDir;
-  return typeof dir === "string" && dir.trim() ? dir.trim() : null;
-}
-
-/**
- * 恢复「升级护送」的用户数据（兜底）：新安装器升级时会把用户数据目录改名转移到
- * 壁纸工坊.wf-upgrade-backup，旧版卸载完成后再放回；被中断遗留的副本停放于
- * 壁纸工坊.wf-upgrade-parked。这里在应用启动时自动处置 —— 无论中间出了什么
- * 状况（安装器崩溃 / 用户取消安装），数据都不会丢：
- *  - 数据目录缺失或仅空壳库（体积 ≤ 空模板）→ 恢复护送副本；
- *  - 现库已有真实数据（体积超过空模板）→ 副本视为陈旧残留，清理。
- */
-function restoreEscortedData() {
-  try {
-    const dir = dataDir();
-    const dbInDir = path.join(dir, "wallpaper.db");
-    const template = IS_DEV
-      ? path.join(__dirname, "..", "release", "resources", "empty.db")
-      : path.join(process.resourcesPath, "app", "empty.db");
-    // 空模板库的体积基线：现库超过它即视为有真实数据（SQLite 按页增长）
-    const freshLimit = fs.existsSync(template) ? fs.statSync(template).size : 40960;
-    const dirHasRealData =
-      fs.existsSync(dbInDir) && fs.statSync(dbInDir).size > freshLimit;
-
-    for (const suffix of [".wf-upgrade-backup", ".wf-upgrade-parked"]) {
-      const candidate = dir + suffix;
-      const dbInCandidate = path.join(candidate, "wallpaper.db");
-      if (!fs.existsSync(dbInCandidate)) continue;
-
-      if (!fs.existsSync(dbInDir) || !dirHasRealData) {
-        // 数据目录缺失 / 仅空壳库 → 恢复护送副本
-        if (fs.existsSync(dir)) {
-          // 空壳目录挪走，护送副本归位
-          const hollow = dir + ".hollow-" + Date.now();
-          fs.renameSync(dir, hollow);
-          fs.renameSync(candidate, dir);
-          fs.rmSync(hollow, { recursive: true, force: true });
-        } else {
-          fs.renameSync(candidate, dir);
-        }
-        console.log("[desktop] 升级护送的用户数据已恢复:", dir);
-        return;
-      }
-
-      // 现库有真实数据 → 副本为陈旧残留，清理
-      fs.rmSync(candidate, { recursive: true, force: true });
-      console.log("[desktop] 清理陈旧护送残留:", candidate);
-    }
-  } catch (e) {
-    console.error("[desktop] 恢复护送数据失败:", e);
-  }
-}
-
-/** SQLite 文件头魔数（前 16 字节）：有效即保留，绝不因缺表/缺列重建 */
-const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "latin1");
-
-function isValidSqlite(dbFile) {
-  try {
-    const fd = fs.openSync(dbFile, "r");
+/** 壁纸保存目录（图片/WallpaperWorkshop，异常时回退「下载」） */
+function getSaveDir() {
+  const base = (() => {
     try {
-      const head = Buffer.alloc(16);
-      const n = fs.readSync(fd, head, 0, 16, 0);
-      return n === 16 && head.equals(SQLITE_MAGIC);
-    } finally {
-      fs.closeSync(fd);
+      return app.getPath("pictures");
+    } catch {
+      return app.getPath("downloads");
     }
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 首次运行：复制安装包内置的空数据库模板（已含全部表结构）。
- * 升级运行：数据库文件只要是有效 SQLite 就原样保留 —— 缺表/缺列由服务端
- * 启动时自动修补（instrumentation），旧记录一条不丢；
- * 仅真正损坏（非 SQLite 文件）时备份后重建。
- */
-function ensureDatabase() {
-  const dir = dataDir();
-  dbPath = path.join(dir, "wallpaper.db");
-
-  const template = IS_DEV
-    ? path.join(__dirname, "..", "release", "resources", "empty.db")
-    : path.join(process.resourcesPath, "app", "empty.db");
-
+  })();
+  const dir = path.join(base, SAVE_DIR_NAME);
   fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
-  if (fs.existsSync(dbPath)) {
-    if (isValidSqlite(dbPath)) return dbPath; // 有效 → 永不重建（结构问题交给服务端自动修补）
-    // 真正损坏（非 SQLite 文件）：备份后重建
-    const backup = path.join(dir, `wallpaper.db.bak-${Date.now()}`);
+/** 同名不覆盖：存在则追加 (1) (2) … */
+function uniqueSavePath(dir, filename) {
+  const ext = path.extname(filename);
+  const base = filename.slice(0, filename.length - ext.length);
+  let candidate = path.join(dir, filename);
+  if (!fs.existsSync(candidate)) return candidate;
+  for (let i = 1; i < 1000; i++) {
+    candidate = path.join(dir, `${base} (${i})${ext}`);
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(dir, `${Date.now()}-${filename}`);
+}
+
+/* --------------------------- app:// 协议（核心） --------------------------- */
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "app",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
+
+/** 把 app://local/<path> 映射到 renderer/ 下的文件（防目录穿越） */
+function installAppProtocol() {
+  protocol.handle("app", async (request) => {
+    let pathname;
     try {
-      fs.copyFileSync(dbPath, backup);
-      console.log(`[desktop] 数据库文件损坏，旧文件备份至 ${backup}`);
-    } catch (e) {
-      console.error("[desktop] 备份损坏数据库失败（将继续重建）:", e);
+      pathname = decodeURIComponent(new URL(request.url).pathname);
+    } catch {
+      return notFound();
+    }
+    if (!pathname || pathname === "/") pathname = "/index.html";
+    const safe = path.normalize(pathname).replace(/^([/\\])+/, "");
+    const filePath = path.join(RENDERER_DIR, safe);
+    // 目录穿越防护（path.join 已归一化，再校验前缀）
+    if (filePath !== RENDERER_DIR && !filePath.startsWith(RENDERER_DIR + path.sep)) {
+      return new Response("Forbidden", { status: 403 });
     }
     try {
-      fs.rmSync(dbPath, { force: true });
-      fs.rmSync(path.join(dir, "wallpaper.db-journal"), { force: true });
-      fs.rmSync(path.join(dir, "wallpaper.db-wal"), { force: true });
-      fs.rmSync(path.join(dir, "wallpaper.db-shm"), { force: true });
-    } catch (e) {
-      console.error("[desktop] 清理损坏数据库文件失败:", e);
-    }
-  }
-
-  fs.copyFileSync(template, dbPath);
-  console.log("[desktop] 数据库已初始化:", dbPath);
-  return dbPath;
-}
-
-/* ---------------- 内嵌 Next 服务器 ---------------- */
-
-/** 挑一个空闲端口（优先默认端口，失败则顺延/回退随机） */
-function pickPort(preferred) {
-  return new Promise((resolve) => {
-    const tryNext = (i) => {
-      const port = preferred + i;
-      const srv = net.createServer();
-      const onErr = () => {
-        srv.close();
-        if (i < 4) tryNext(i + 1);
-        else {
-          const rnd = net.createServer();
-          rnd.listen(0, "127.0.0.1", () => {
-            const p = rnd.address().port;
-            rnd.close(() => resolve(p));
-          });
-        }
-      };
-      srv.once("error", onErr);
-      srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(port)));
-    };
-    tryNext(0);
-  });
-}
-
-function startServer(port) {
-  const dir = serverDir();
-  const entry = path.join(dir, "server.js");
-  if (!fs.existsSync(entry)) {
-    throw new Error(`未找到内嵌服务器: ${entry}`);
-  }
-
-  const env = {
-    ...process.env,
-    ELECTRON_RUN_AS_NODE: "1",
-    NODE_ENV: "production",
-    PORT: String(port),
-    HOSTNAME: "127.0.0.1",
-    // Prisma SQLite 绝对路径（Windows 下用正斜杠）
-    DATABASE_URL: "file:" + dbPath.replace(/\\/g, "/"),
-    // 壁纸图片磁盘缓存目录（v1.4.3：缩略图/预览图跨重启秒开；
-    // 随用户数据目录在升级护送中一并保留，卸载应用时一并清理）
-    WF_IMG_CACHE_DIR: path.join(dataDir(), "img-cache"),
-  };
-
-  console.log(`[desktop] 启动内嵌服务器 127.0.0.1:${port}，数据库 ${dbPath}`);
-  serverProc = spawn(process.execPath, [entry], {
-    cwd: dir,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-
-  serverProc.stdout.on("data", (d) => process.stdout.write("[server] " + d));
-  serverProc.stderr.on("data", (d) => process.stderr.write("[server] " + d));
-
-  serverProc.once("exit", (code) => {
-    console.error(`[desktop] 内嵌服务器退出 code=${code}`);
-    serverProc = null;
-    if (!quitting && win && !win.isDestroyed()) {
-      // 意外崩溃：自动重启一次并刷新窗口
-      void restartServer();
-    }
-  });
-}
-
-async function restartServer() {
-  try {
-    const port = await pickPort(DEFAULT_PORT);
-    startServer(port);
-    await waitForServer(port, 30000);
-    currentPort = port;
-    if (win && !win.isDestroyed()) await win.loadURL(`http://127.0.0.1:${port}/`);
-  } catch (e) {
-    dialog.showErrorBox(APP_NAME, "本地服务启动失败，应用即将退出。\n" + (e?.message || e));
-    app.quit();
-  }
-}
-
-/** 轮询等待服务器就绪 */
-function waitForServer(port, timeoutMs = 90000) {
-  const started = Date.now();
-  return new Promise((resolve, reject) => {
-    const ping = () => {
-      if (serverProc && serverProc.exitCode !== null) {
-        return reject(new Error("内嵌服务器进程启动失败，请查看日志"));
-      }
-      const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: 2000 }, (res) => {
-        res.resume();
-        resolve();
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) return notFound();
+      const body = await fs.promises.readFile(filePath);
+      return new Response(body, {
+        headers: { "content-type": MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream" },
       });
-      req.on("error", () => {
-        if (Date.now() - started > timeoutMs) return reject(new Error("内嵌服务器启动超时"));
-        setTimeout(ping, 300);
-      });
-    };
-    ping();
+    } catch {
+      return notFound();
+    }
   });
 }
 
-/* ---------------- 窗口 / 下载 / 外链 ---------------- */
+/* ----------------------------- 窗口状态记忆 ----------------------------- */
 
-function isLocalUrl(url, port) {
-  return (
-    url.startsWith(`http://127.0.0.1:${port}`) || url.startsWith(`http://localhost:${port}`)
-  );
-}
+const STATE_FILE = () => path.join(app.getPath("userData"), "window-state.json");
 
-/** 下载目录：用户自选位置优先，默认系统「下载\壁纸工坊」 */
-function downloadDir() {
-  const chosen = chosenDownloadDir();
-  if (chosen) {
-    try {
-      fs.mkdirSync(chosen, { recursive: true });
-      return chosen;
-    } catch (e) {
-      console.error("[desktop] 自选下载目录不可用，回退默认:", e);
-    }
-  }
-  let base;
+function loadWindowState() {
   try {
-    base = app.getPath("downloads");
+    const s = JSON.parse(fs.readFileSync(STATE_FILE(), "utf8"));
+    if (typeof s.x !== "number" || typeof s.y !== "number" || typeof s.width !== "number") return null;
+    // 窗口至少部分落在某块显示器内，否则丢弃（拔了外接屏的场景）
+    const { screen } = require("electron");
+    const display = screen.getDisplayMatching({ x: s.x, y: s.y, width: s.width, height: s.height });
+    const wa = display.workArea;
+    const visible =
+      s.x < wa.x + wa.width && s.x + s.width > wa.x && s.y < wa.y + wa.height && s.y + s.height > wa.y;
+    return visible ? s : null;
   } catch {
-    base = path.join(os.homedir(), "Downloads");
+    return null;
   }
-  return path.join(base, "壁纸工坊");
 }
 
-/** 网页 → 主进程 IPC：获取/选择/恢复下载目录、打开目录、定位已下载文件（调起磁盘文件管理器） */
-function setupIpc() {
-  ipcMain.handle("wf:get-download-dir", () => {
-    try {
-      return downloadDir();
-    } catch (e) {
-      return "";
+function persistWindowState(win) {
+  try {
+    const b = win.getNormalBounds();
+    if (b.width > 0 && b.height > 0) {
+      fs.mkdirSync(path.dirname(STATE_FILE()), { recursive: true });
+      fs.writeFileSync(STATE_FILE(), JSON.stringify(b));
     }
-  });
+  } catch {
+    /* 忽略：关闭时机竞争等 */
+  }
+}
 
-  /** 弹出系统「选择文件夹」对话框；确认后持久化并返回新目录 */
-  ipcMain.handle("wf:choose-download-dir", async () => {
-    try {
-      const result = await dialog.showOpenDialog(win, {
-        title: "选择壁纸保存位置",
-        defaultPath: downloadDir(),
-        properties: ["openDirectory", "createDirectory"],
-      });
-      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
-        return { ok: false, canceled: true };
+/* ------------------------------ 下载接管 ------------------------------ */
+
+/** 下载会话：一批（单张或批量）进行中的计数 + 已存文件名，用于汇总通知 */
+const dl = { active: 0, batch: 0, savedNames: [] };
+
+function notifySaved() {
+  const n = dl.batch;
+  const dir = getSaveDir();
+  const title = n === 1 ? "壁纸已保存" : `已保存 ${n} 张壁纸`;
+  const names = dl.savedNames.slice(0, 3).join("、") + (dl.savedNames.length > 3 ? " 等" : "");
+  try {
+    if (Notification.isSupported()) {
+      const note = new Notification({ title, body: `${names}\n保存位置：${dir}`, timeoutType: "never" });
+      note.on("click", () => shell.openPath(dir));
+      note.show();
+    }
+  } catch {
+    /* 通知失败不影响下载 */
+  }
+}
+
+function installDownloadHandler() {
+  session.defaultSession.on("will-download", (_event, item) => {
+    const dir = getSaveDir();
+    const filename = item.getFilename() || `wallpaper-${Date.now()}.png`;
+    item.setSavePath(uniqueSavePath(dir, filename));
+    if (dl.active === 0) {
+      dl.batch = 0;
+      dl.savedNames = [];
+    }
+    dl.active += 1;
+    dl.batch += 1;
+    dl.savedNames.push(filename);
+    item.on("done", (_e, state) => {
+      dl.active -= 1;
+      if (state !== "completed" && dl.savedNames.includes(filename)) {
+        dl.savedNames = dl.savedNames.filter((f) => f !== filename);
+        dl.batch -= 1;
       }
-      const dir = result.filePaths[0];
-      fs.mkdirSync(dir, { recursive: true });
-      const settings = readSettings();
-      settings.downloadDir = dir;
-      writeSettings(settings);
-      console.log("[desktop] 下载位置已更新:", dir);
-      return { ok: true, dir };
-    } catch (e) {
-      return { ok: false, error: String((e && e.message) || e) };
-    }
-  });
-
-  /** 恢复默认下载目录（取消自选） */
-  ipcMain.handle("wf:reset-download-dir", () => {
-    try {
-      const settings = readSettings();
-      delete settings.downloadDir;
-      writeSettings(settings);
-      return { ok: true, dir: downloadDir() };
-    } catch (e) {
-      return { ok: false, error: String((e && e.message) || e) };
-    }
-  });
-
-  ipcMain.handle("wf:open-download-dir", () => {
-    try {
-      const dir = downloadDir();
-      fs.mkdirSync(dir, { recursive: true });
-      const err = shell.openPath(dir);
-      if (err) console.error("[desktop] 打开下载目录失败:", err);
-      return err || "";
-    } catch (e) {
-      return String((e && e.message) || e);
-    }
-  });
-
-  ipcMain.handle("wf:reveal-file", (_event, filePath) => {
-    try {
-      // 仅允许定位下载目录内的文件，避免网页探测任意磁盘路径
-      const dir = path.resolve(downloadDir());
-      const target = path.resolve(String(filePath || ""));
-      if (target !== dir && !target.startsWith(dir + path.sep)) return "invalid path";
-      if (!fs.existsSync(target)) return "not found";
-      shell.showItemInFolder(target);
-      return "";
-    } catch (e) {
-      return String((e && e.message) || e);
-    }
+      if (dl.active <= 0) {
+        dl.active = 0;
+        if (dl.batch > 0) notifySaved();
+        dl.batch = 0;
+      }
+    });
   });
 }
 
-/** 重名文件自动追加序号：name (1).ext */
-function uniquePath(dir, filename) {
-  let target = path.join(dir, filename);
-  if (!fs.existsSync(target)) return target;
-  const dot = filename.lastIndexOf(".");
-  const stem = dot === -1 ? filename : filename.slice(0, dot);
-  const ext = dot === -1 ? "" : filename.slice(dot);
-  for (let i = 1; i < 999; i++) {
-    target = path.join(dir, `${stem} (${i})${ext}`);
-    if (!fs.existsSync(target)) return target;
-  }
-  return path.join(dir, `${stem}-${Date.now()}${ext}`);
+/* -------------------------------- 菜单 -------------------------------- */
+
+function buildMenu(win) {
+  const openSaveDir = () => shell.openPath(getSaveDir());
+  const about = () =>
+    dialog.showMessageBox(win, {
+      type: "info",
+      title: "关于壁纸工坊",
+      message: `壁纸工坊 v${APP_VERSION}`,
+      detail: [
+        "哲风壁纸实时获取与原图下载工具 · Windows 桌面版",
+        "",
+        `版本：v${APP_VERSION}（Electron ${process.versions.electron} / Chromium ${process.versions.chrome}）`,
+        "壁纸自动保存到「图片 / WallpaperWorkshop」文件夹",
+        "数据实时来自 haowallpaper.com（哲风壁纸），版权归原作者所有",
+      ].join("\n"),
+      buttons: ["确定", "打开 GitHub"],
+      defaultId: 0,
+      cancelId: 0,
+    }).then(({ response }) => {
+      if (response === 1) shell.openExternal("https://github.com/xiaobaiba999/bizhi/releases");
+    });
+
+  const template = [
+    {
+      label: "文件(F)",
+      submenu: [
+        { label: "打开保存文件夹", accelerator: "CmdOrCtrl+O", click: openSaveDir },
+        { type: "separator" },
+        { label: "重新加载", accelerator: "CmdOrCtrl+R", click: () => win.webContents.reload() },
+        { type: "separator" },
+        { role: "quit", label: "退出" },
+      ],
+    },
+    {
+      label: "视图(V)",
+      submenu: [
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "缩小" },
+        { role: "resetZoom", label: "重置缩放" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "全屏" },
+        { role: "toggleDevTools", label: "开发者工具" },
+      ],
+    },
+    {
+      label: "帮助(H)",
+      submenu: [
+        { label: "关于壁纸工坊", click: about },
+        { label: "数据来源：哲风壁纸官网", click: () => shell.openExternal("https://haowallpaper.com") },
+        {
+          label: "GitHub Releases（历史版本）",
+          click: () => shell.openExternal("https://github.com/xiaobaiba999/bizhi/releases"),
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-/** 接住网页的 attachment 下载，静默保存（批量下载 18 张也不会弹 18 次保存框） */
-function setupDownloads() {
-  session.defaultSession.on("will-download", (event, item) => {
-    try {
-      const dir = downloadDir();
-      fs.mkdirSync(dir, { recursive: true });
-      const filename = item.getFilename() || "wallpaper.png";
-      const target = uniquePath(dir, filename);
-      item.setSavePath(target);
-      item.once("done", (_e, state) => {
-        console.log(`[desktop] 下载${state === "completed" ? "完成" : "中断"}: ${target}`);
-        if (state === "completed") {
-          // 推送给网页：弹「已保存 + 打开文件夹」提示（网页层做防抖合并）
-          try {
-            if (win && !win.isDestroyed()) {
-              win.webContents.send("wf:download-done", {
-                path: target,
-                filename: path.basename(target),
-              });
-            }
-          } catch {
-            /* ignore */
-          }
-          try {
-            if (Notification.isSupported()) {
-              new Notification({
-                title: "壁纸已保存",
-                body: `${path.basename(target)}\n保存位置：${downloadDir()}`,
-              }).show();
-            }
-          } catch {
-            /* ignore */
-          }
-        }
-      });
-    } catch (e) {
-      console.error("[desktop] 处理下载失败:", e);
-    }
-  });
-}
+/* ------------------------------ 主窗口 ------------------------------ */
 
-function createWindow(port) {
-  win = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 480,
-    minHeight: 640,
+function createWindow() {
+  const saved = loadWindowState();
+  const win = new BrowserWindow({
+    width: saved?.width || 1280,
+    height: saved?.height || 860,
+    x: saved?.x,
+    y: saved?.y,
+    minWidth: 960,
+    minHeight: 620,
     show: false,
-    backgroundColor: "#ffffff",
-    title: APP_NAME,
+    backgroundColor: "#111113",
     autoHideMenuBar: true,
+    icon: ICON_PNG,
+    title: "壁纸工坊",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: false,
@@ -476,110 +290,115 @@ function createWindow(port) {
   });
 
   win.once("ready-to-show", () => win.show());
+  win.on("close", () => persistWindowState(win));
 
-  // 拦截外部链接 → 系统浏览器
+  // 外链（target=_blank / window.open）→ 系统默认浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url) && !isLocalUrl(url, port)) {
-      void shell.openExternal(url);
-      return { action: "deny" };
-    }
-    return { action: "allow" };
-  });
-  win.webContents.on("will-navigate", (event, url) => {
-    if (/^https?:\/\//i.test(url) && !isLocalUrl(url, port)) {
-      event.preventDefault();
-      void shell.openExternal(url);
-    }
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
   });
 
-  // 冒烟测试钩子：加载完成后截图并退出
-  if (process.env.WF_SNAPSHOT) {
-    const file = path.resolve(process.env.WF_SNAPSHOT);
-    win.webContents.once("did-finish-load", () => {
-      setTimeout(async () => {
-        try {
-          const img = await win.webContents.capturePage();
-          fs.writeFileSync(file, img.toPNG());
-          console.log("[desktop] 截图已保存:", file);
-        } catch (e) {
-          console.error("[desktop] 截图失败:", e);
-        }
-        // 桌面桥接探针：验证 preload + IPC 全链路（getDownloadDir 走主进程）
-        try {
-          const probe = await win.webContents.executeJavaScript(
-            `(async () => {
-               const api = window.desktopApp;
-               if (!api) return { bridge: false };
-               const dir = await api.getDownloadDir();
-               const open = typeof api.chooseDownloadDir === "function";
-               return { bridge: true, chooseDialog: open, dir: String(dir) };
-             })()`,
+  // 主文档加载失败（本地资源，理论上罕见）：给一键重试
+  win.webContents.on("did-fail-load", (_e, code, desc, _url, isMain) => {
+    if (!isMain || code === -3) return; // -3 = 用户取消
+    dialog
+      .showMessageBox(win, {
+        type: "error",
+        title: "页面加载失败",
+        message: "渲染层加载失败",
+        detail: `${desc}（代码 ${code}）`,
+        buttons: ["重试", "忽略"],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response === 0) win.webContents.reload();
+      });
+  });
+
+  buildMenu(win);
+  if (SMOKE) installSmoke(win);
+  win.loadURL("app://local/index.html");
+  return win;
+}
+
+/* ---------------------------- 无头冒烟测试 ---------------------------- */
+
+/** WW_SMOKE=1 时：加载 → 等图片 → 截图 + JSON 报告 → 退出码 0/2/3 */
+function installSmoke(win) {
+  const report = { loaded: false, url: "", title: "", images: 0, imagesComplete: 0, sampleText: "" };
+  const out = process.env.WW_SMOKE_OUT
+    ? path.resolve(process.env.WW_SMOKE_OUT)
+    : path.join(APP_DIR, "smoke-desktop.png");
+  const die = setTimeout(() => {
+    console.log(`[smoke] 超时未加载完成 ${JSON.stringify(report)}`);
+    app.exit(3);
+  }, 60_000).unref();
+
+  win.webContents.on("did-finish-load", async () => {
+    try {
+      report.loaded = true;
+      report.url = win.webContents.getURL();
+      report.title = win.webContents.getTitle();
+      // 最多等 40s 让图片进入并加载完成（源站抓取 + 网格渲染）
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const s = await win.webContents
+          .executeJavaScript(
+            `(() => {
+              const imgs = Array.from(document.querySelectorAll('img'));
+              return {
+                n: imgs.length,
+                done: imgs.filter(im => im.complete && im.naturalWidth > 0).length,
+                text: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 300),
+              };
+            })()`,
             true
-          );
-          console.log("[desktop] 桥接探针:", JSON.stringify(probe));
-        } catch (e) {
-          console.error("[desktop] 桥接探针失败:", e);
+          )
+          .catch(() => null);
+        if (s) {
+          report.images = s.n;
+          report.imagesComplete = s.done;
+          report.sampleText = s.text;
         }
-        setTimeout(() => app.exit(0), 400);
-      }, 3000);
-    });
-  }
-
-  void win.loadURL(`http://127.0.0.1:${port}/`);
-
-  win.on("closed", () => {
-    win = null;
+        if (report.images > 0 && report.imagesComplete >= Math.min(report.images, 8)) break;
+      }
+      const img = await win.webContents.capturePage();
+      fs.writeFileSync(out, img.toPNG());
+      report.screenshot = out;
+    } catch (e) {
+      report.error = String(e && e.message ? e.message : e);
+    }
+    clearTimeout(die);
+    console.log(`[smoke] ${JSON.stringify(report)}`);
+    const ok = report.loaded && report.images > 0 && report.imagesComplete > 0;
+    app.exit(ok ? 0 : 2);
   });
 }
 
-/* ---------------- 生命周期 ---------------- */
+/* ------------------------------- 生命周期 ------------------------------- */
 
-const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
+if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => {
+    const [win] = BrowserWindow.getAllWindows();
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
     }
   });
 
-  app.whenReady().then(async () => {
-    Menu.setApplicationMenu(null);
-    setupDownloads();
-    setupIpc();
-
-    try {
-      restoreEscortedData();
-      ensureDatabase();
-      currentPort = await pickPort(DEFAULT_PORT);
-      startServer(currentPort);
-      await waitForServer(currentPort);
-      createWindow(currentPort);
-    } catch (e) {
-      dialog.showErrorBox(APP_NAME, "应用启动失败，请重新安装或联系开发者。\n" + (e?.message || e));
-      app.quit();
-    }
-
+  app.whenReady().then(() => {
+    installAppProtocol();
+    installDownloadHandler();
+    createWindow();
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow(currentPort);
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   });
 
   app.on("window-all-closed", () => {
-    app.quit();
-  });
-
-  app.on("before-quit", () => {
-    quitting = true;
-    if (serverProc) {
-      try {
-        serverProc.kill();
-      } catch {
-        /* ignore */
-      }
-      serverProc = null;
-    }
+    if (process.platform !== "darwin") app.quit();
   });
 }

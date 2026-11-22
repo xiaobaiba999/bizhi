@@ -1,20 +1,19 @@
 #!/usr/bin/env node
 /**
- * 壁纸工坊 · GitHub Release 安装包上传（REST API 版）
+ * 壁纸工坊 · GitHub Release 上传（REST API 版）
  *
- * 用途：把 Windows 安装包（~170MB）作为 Release 附件上传到仓库。
- * 仓库分支 blob 单文件上限 100MB，装不下安装包；Release 附件上限 2GB，
- * 还自带 CDN 直链下载，正好托管桌面安装版分发。
+ * 用途：把网页版离线压缩包（WallpaperWorkshop-Web-v<版本>.zip，约 2MB）
+ * 作为 Release 附件上传到仓库，并写入该版本的发布说明。
  *
  * 流程：读 package.json 版本 → 找/建 v{version} Release → 删除同名旧附件
- * → 上传新附件（大文件专用超时，失败自动整档重试）。
- *
- * 附件名仅用 ASCII（WallpaperWorkshop-Setup-v{version}.exe），
- * 与 src/lib/version.ts 的 RELEASE_SETUP_URL 保持一致。
+ * → 上传新附件（失败自动整档重试 3 次）。
  *
  * 用法（项目根目录执行）：
  *   node scripts/upload-release-to-github.mjs <token>
  *   node scripts/upload-release-to-github.mjs          # 读 env GITHUB_TOKEN、~/.bizhi-token
+ *   node scripts/upload-release-to-github.mjs <token> <zip路径>  # 自定义附件路径
+ *
+ * 前置：先执行 node scripts/build-gh-pages.mjs /bizhi 生成 release/WallpaperWorkshop-Web-v<版本>.zip
  */
 
 import fs from "node:fs";
@@ -55,28 +54,24 @@ if (!token) {
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 const VERSION = pkg.version;
 const TAG = `v${VERSION}`;
-const ASSET_NAME = `WallpaperWorkshop-Setup-v${VERSION}.exe`;
-/** 安装包位置（electron-builder 输出在 release/out/，脚本参数可覆盖） */
-function resolveLocalExe() {
+const ASSET_NAME = `WallpaperWorkshop-Web-v${VERSION}.zip`;
+/** zip 位置（build-gh-pages.mjs 产出在 release/，脚本参数可覆盖） */
+function resolveLocalZip() {
   const arg = process.argv[3];
   if (arg && !arg.startsWith("-")) return arg;
-  for (const p of [
-    path.join(ROOT, "release", "out", `壁纸工坊-Setup-${VERSION}.exe`),
-    path.join(ROOT, "release", `壁纸工坊-Setup-${VERSION}.exe`),
-  ]) {
-    if (fs.existsSync(p)) return p;
-  }
-  return path.join(ROOT, "release", "out", `壁纸工坊-Setup-${VERSION}.exe`);
+  const def = path.join(ROOT, "release", ASSET_NAME);
+  return def;
 }
-const LOCAL_EXE = resolveLocalExe();
+const LOCAL_ZIP = resolveLocalZip();
 
-if (!fs.existsSync(LOCAL_EXE)) {
-  console.error(`[release] 未找到安装包: ${LOCAL_EXE}`);
+if (!fs.existsSync(LOCAL_ZIP)) {
+  console.error(`[release] 未找到网页版压缩包: ${LOCAL_ZIP}`);
+  console.error(`        请先执行: node scripts/build-gh-pages.mjs /bizhi`);
   process.exit(1);
 }
-const EXE_SIZE = fs.statSync(LOCAL_EXE).size;
-if (EXE_SIZE < 1024 * 1024) {
-  console.error(`[release] 安装包体积异常（${EXE_SIZE} 字节），中止上传`);
+const ZIP_SIZE = fs.statSync(LOCAL_ZIP).size;
+if (ZIP_SIZE < 1024) {
+  console.error(`[release] 压缩包体积异常（${ZIP_SIZE} 字节），中止上传`);
   process.exit(1);
 }
 
@@ -119,25 +114,25 @@ async function apiRetry(method, urlPath, body, opts, tries = 4) {
   throw lastErr;
 }
 
-/** 大文件整档上传（专用长超时；可重试） */
+/** 附件整档上传（可重试） */
 async function uploadAsset(uploadBase, name, filePath) {
   const url = `${uploadBase}${uploadBase.includes("?") ? "&" : "?"}name=${encodeURIComponent(name)}`;
   const buf = fs.readFileSync(filePath);
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      process.stdout.write(`    上传中（第 ${attempt} 次，${(buf.length / 1024 / 1024).toFixed(0)}MB）…\n`);
+      process.stdout.write(`    上传中（第 ${attempt} 次，${(buf.length / 1024 / 1024).toFixed(2)}MB）…\n`);
       const res = await fetch(url, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
           "X-GitHub-Api-Version": "2022-11-28",
           "User-Agent": "bizhi-release-uploader",
-          "Content-Type": "application/octet-stream",
+          "Content-Type": "application/zip",
           "Content-Length": String(buf.length),
         },
         body: buf,
-        // 170MB 上传给足 20 分钟（含慢速网络兜底）
-        signal: AbortSignal.timeout(20 * 60 * 1000),
+        // 给足 10 分钟（含慢速网络兜底）
+        signal: AbortSignal.timeout(10 * 60 * 1000),
         duplex: "half",
       });
       if (res.ok) return await res.json();
@@ -154,28 +149,46 @@ async function uploadAsset(uploadBase, name, filePath) {
 
 /* --------------------------------- 主流程 --------------------------------- */
 
-const RELEASE_NOTES = `## 壁纸工坊 v${VERSION} —— 图片显示速度大幅优化
+const RELEASE_NOTES = `## 壁纸工坊 v${VERSION} —— 刷新强化 + 死链图片秒级兜底
 
-### 本次更新（缓存优化专项）
-- **三级图片缓存**：内存 LRU → 本地磁盘缓存（\`%APPDATA%\\壁纸工坊\\img-cache\`，跨重启永久生效）→ 源站回源；同一图片的并发请求自动合并为一次回源
-- **二次浏览零回源**：看过的壁纸重启应用后仍秒开（实测磁盘命中平均 12ms/张，原先每张需经 CDN 数百 ms～数秒）
-- **缩略图回退链修复**：缩略图变体 404 时不再直接加载 2K/4K 巨型原图（旧版「部分图片显示太慢 / 空白」的根因），改为 缩略图 → s240 小图 → 原图 逐级兜底 + 破缓存重试
-- **加载体验**：图片加载中显示微光占位骨架、加载完成淡入；全部失败时明确显示占位图标，不再无声空白
-- **首屏加速**：网格前 6 张立即加载并高优先级，其余滚动到再加载
-- **缓存自我管理**：磁盘缓存上限 512MB 超限自动按最旧淘汰，无需用户维护
+### 本次更新（v1.4.6 优化专项）
 
-### 历史要点（自 v1.4.2 起）
-- 屏蔽记录永久保留（升级数据护送 + 数据库自动修补，升级版本也保留）
-- 下载过的壁纸自动隐藏；自选下载位置跨版本记住
-- NSIS 升级安装不再误删用户数据目录
+**刷新真正「刷出新东西」**
+- 刷新现在**强制回源**：绕过服务端 10 分钟页缓存，直接从哲风壁纸源站拿最新内容
+- 刷新**空轮自动续扫**：下载记录特别多时，单轮 40 页可能仍全被过滤，现在自动续扫（最多 5 轮 / 200 页），刷新必出图
+- 刷新过程逐轮上屏，能直观看到扫描进度；跳过 / 载入张数提示更准确
 
-### 安装
-下载下方 \`WallpaperWorkshop-Setup-v${VERSION}.exe\`，双击安装即可（Windows 10/11 64 位）。`;
+**死链图片处理（源自线上日志实证）**
+- CDN 上部分缩略图变体是**永久 404**（源站没生成）：旧版每张要白等 ~1.9 秒重试注定失败的请求
+- 现在 404/410/403 判定为永久失败：**不重试、透传状态码**，前端回退链（缩略图 → s240 小图 → 原图）立即切换
+- 永久失败进 **5 分钟负缓存**：同批后续请求 0ms 出结果，不再拖慢健康图片
+
+**网络抖动自愈加强**
+- 图片整条回退链失败后的自动重试从 2 轮（4s / 12s）扩到 **3 轮（4s / 12s / 30s）**，
+  批量下载挤占带宽 / CDN 限流稍长的窗口也能自己缓过来，不再过早定格「加载失败」
+- 每一轮重试都换**全新破缓存参数**（rr 递增），浏览器 / 代理不可能把上一轮的
+  失败响应当成本轮结果返回，重试必发真实网络请求
+
+**其他**
+- 预览弹窗补充无障碍描述（aria）
+- 版本标识统一升级
+
+### v1.4.5 核心修复（上一版，此处保留说明）
+- **图片经常不显示**：改为游标深度扫描（4 页一组并行、单轮最多 40 页、自动续扫），
+  无论下载过多少张，永远能扫到未下载的新壁纸，网格不再整页空白
+- **刷新没用**：刷新 = 从源站第 1 页深度重扫（跳过所有已下载/屏蔽），
+  失败图片重试带全新破缓存参数，不再命中旧的失败响应
+
+### 使用
+- **在线版**：https://xiaobaiba999.github.io/bizhi/
+- **离线版**：下载下方 \`WallpaperWorkshop-Web-v${VERSION}.zip\` 解压后任意浏览器打开
+  \`index.html\` 即可（需联网加载壁纸）
+- 数据说明：网页版下载 / 屏蔽记录存在浏览器 localStorage，换浏览器 / 隐身模式不共享`;
 
 async function main() {
   console.log(`[release] 目标：${OWNER}/${REPO} 的 ${TAG} Release`);
-  console.log(`    本地安装包: ${LOCAL_EXE}`);
-  console.log(`    附件名: ${ASSET_NAME}（${(EXE_SIZE / 1024 / 1024).toFixed(1)}MB）`);
+  console.log(`    本地压缩包: ${LOCAL_ZIP}`);
+  console.log(`    附件名: ${ASSET_NAME}（${(ZIP_SIZE / 1024 / 1024).toFixed(2)}MB）`);
 
   console.log(`\n[release] ① 校验仓库与 token`);
   const repo = await apiRetry("GET", `/repos/${OWNER}/${REPO}`);
@@ -186,7 +199,7 @@ async function main() {
     ok404: true,
   });
   if (rel.data) {
-    console.log(`    Release 已存在（id=${rel.data.id}），更新附件`);
+    console.log(`    Release 已存在（id=${rel.data.id}），更新说明与附件`);
     rel = await apiRetry("PATCH", `/repos/${OWNER}/${REPO}/releases/${rel.data.id}`, {
       body: RELEASE_NOTES,
       draft: false,
@@ -195,6 +208,7 @@ async function main() {
   } else {
     rel = await apiRetry("POST", `/repos/${OWNER}/${REPO}/releases`, {
       tag_name: TAG,
+      target_commitish: "main",
       name: `壁纸工坊 ${TAG}`,
       body: RELEASE_NOTES,
       draft: false,
@@ -215,14 +229,13 @@ async function main() {
     }
   }
 
-  console.log(`[release] ④ 上传安装包附件`);
+  console.log(`[release] ④ 上传压缩包附件`);
   const uploadBase = rel.data.upload_url.replace(/\{[^}]*\}$/, "");
-  const asset = await uploadAsset(uploadBase, ASSET_NAME, LOCAL_EXE);
+  const asset = await uploadAsset(uploadBase, ASSET_NAME, LOCAL_ZIP);
 
   console.log(`\n[release] 完成 ✔`);
   console.log(`    Release: ${rel.data.html_url}`);
   console.log(`    附件直链: ${asset.browser_download_url}`);
-  console.log(`    （网页版下载按钮指向同一 URL，自动保持一致）`);
 }
 
 main().catch((e) => {

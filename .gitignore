@@ -1,7 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -16,6 +16,9 @@
 # next.js
 /.next/
 /out/
+
+# production
+/build
 
 # misc
 .DS_Store
@@ -33,33 +36,35 @@ yarn-error.log*
 # vercel
 .vercel
 
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+local-*
+.claude
+.z-ai-config
+*.log
+dev.log
+dev.out.log
+test
+prompt
 
-# 桌面版打包产物（安装包不进 git：GitHub 单文件 100MB 硬限制）
-/.next-desktop/
-/release/
-/public/desktop/
-/download/*.exe
-
+server.log
+# Skills directory
+/skills/
 # GitHub Pages 静态导出产物与构建临时目录（由 scripts/build-gh-pages.mjs 生成/恢复）
 /.gh-pages-build/
 /github-pages-dist/
 /.api-stash/
-/.desktop-stash/
-/.zip-stash/
-/.instrumentation-stash.ts
-/public/*.zip
+/release/
 
-# 静态版本地验证服务器（一次性测试工具）
-/mini-gh-pages-test/
+# 桌面版（Electron）构建产物（desktop/renderer 与 node_modules 见 desktop/.gitignore）
+/.desktop-render-build/
 
-# 本地运行数据与日志（含登录令牌等敏感数据，绝不入库）
+# 本地运行数据（含下载/屏蔽记录，不入库）
 /db/
-/dev.log
-/build-desktop.log
-/upload/
 
-# 一次性测试工具（CDN 故障注入等）
+# 工具产物
 /tool-results/
+/upload/
+/download/

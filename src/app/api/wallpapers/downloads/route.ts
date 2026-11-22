@@ -2,30 +2,45 @@ import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
 
 /**
- * GET /api/wallpapers/downloads —— 下载记录列表（用于「已下载不再显示」的管理）
- * DELETE /api/wallpapers/downloads?wtId=<id> —— 删除单条记录；不带 wtId 清空全部
+ * /api/wallpapers/downloads
+ * - GET：下载记录总数
+ * - POST：记录一次下载（body: { id, title, src, wtId? }）
+ * - DELETE：清空下载记录（被隐藏的壁纸恢复显示）
  */
 export async function GET() {
+  const downloadedCount = await db.download.count()
+  return NextResponse.json({ downloadedCount })
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const rows = await db.download.findMany({ orderBy: { downloadedAt: "desc" } })
-    return NextResponse.json({ count: rows.length, items: rows })
-  } catch (e) {
-    console.error("GET /api/wallpapers/downloads error:", e)
-    return NextResponse.json({ error: "读取下载记录失败" }, { status: 500 })
+    const body = (await req.json()) as {
+      id?: string
+      title?: string
+      src?: string
+      wtId?: string
+    }
+    if (!body.id || !body.src) {
+      return NextResponse.json({ error: "参数不完整" }, { status: 400 })
+    }
+    await db.download.upsert({
+      where: { id: body.id },
+      create: {
+        id: body.id,
+        title: body.title ?? "",
+        src: body.src,
+        wtId: body.wtId ?? null,
+      },
+      update: { title: body.title ?? "", src: body.src },
+    })
+    const downloadedCount = await db.download.count()
+    return NextResponse.json({ ok: true, downloadedCount })
+  } catch {
+    return NextResponse.json({ error: "记录失败" }, { status: 500 })
   }
 }
 
-export async function DELETE(req: NextRequest) {
-  try {
-    const wtId = req.nextUrl.searchParams.get("wtId")
-    if (wtId) {
-      await db.download.deleteMany({ where: { wtId } })
-      return NextResponse.json({ deleted: true, scope: wtId })
-    }
-    await db.download.deleteMany({})
-    return NextResponse.json({ deleted: true, scope: "all" })
-  } catch (e) {
-    console.error("DELETE /api/wallpapers/downloads error:", e)
-    return NextResponse.json({ error: "删除下载记录失败" }, { status: 500 })
-  }
+export async function DELETE() {
+  await db.download.deleteMany({})
+  return NextResponse.json({ ok: true, downloadedCount: 0 })
 }

@@ -19,8 +19,10 @@ interface WallpaperImageProps {
   /** 是否渲染占位骨架/失败占位（预览弹窗等自带加载态的场景可关） */
   placeholder?: boolean
   /**
-   * 外部强制重试（v1.4.4）：值变化时未加载成功的图片立即从头重试
-   * （已加载成功的纹丝不动）。顶部「刷新」按钮递增该值。
+   * 外部强制重试（刷新按钮）：值变化时未加载成功的图片立即从头重试
+   * （已加载成功的纹丝不动），并追加破缓存参数确保发出全新网络请求
+   * （v1.4.5 修复：旧版重试 URL 与首次相同，失败结果可能被浏览器/代理
+   * 短暂缓存，导致「刷新了也没反应」）。
    */
   reloadKey?: number
   onLoad?: () => void
@@ -29,20 +31,21 @@ interface WallpaperImageProps {
 }
 
 /**
- * 失败自动重试的等待梯度（v1.4.4）：
- * 回退链全部失败 → 等 4 秒整链重试 → 再失败等 12 秒重试 → 才算彻底失败。
- * 批量下载期间 CDN 短暂限流 / 带宽被大文件挤占的窗口通常几秒即恢复，
- * 自动重试让网格自己缓过来；顶部刷新按钮则立即重试一次。
+ * 失败自动重试的等待梯度（v1.4.6）：
+ * 回退链全部失败 → 4s → 12s → 30s 共三轮整链重试，之后才彻底失败。
+ * 前两轮（16 秒）覆盖批量下载挤占带宽的窗口；第三轮再争取 30 秒，
+ * 覆盖 CDN 限流稍长的抖动。每轮都换全新破缓存参数（rr 递增），
+ * 浏览器 / 代理不可能把上一轮的失败响应当结果返回。
+ * 顶部刷新按钮则立即重试一次。
  */
-const AUTO_RETRY_DELAYS = [4_000, 12_000]
+const AUTO_RETRY_DELAYS = [4_000, 12_000, 30_000]
 
 /**
- * 壁纸图片（v1.4.4）：
- * - 回退链：缩略图 → s240 小图 → 原图，末级再 r=1 破缓存重试一次
+ * 壁纸图片：
+ * - 回退链：缩略图 → s240 小图 → 原图，末级再破缓存重试一次
  * - 链条走完仍失败：自动按 4s / 12s 退避重试两轮（网络抖动自愈）
  * - 加载中：骨架微光占位；加载完成：淡入显示；彻底失败：占位图标
- * - reloadKey 变化：失败/未加载的图立即重试，成功的图不受影响
- * 配合服务端三级缓存（内存 LRU → 磁盘 → 回源），二次浏览零回源秒开。
+ * - reloadKey 变化：失败/未加载的图立即重试（带全新破缓存参数），成功的不受影响
  */
 export function WallpaperImage({
   candidates,
@@ -66,10 +69,16 @@ export function WallpaperImage({
   const [failed, setFailed] = useState(false)
   /** 已自动重试的轮数（0 = 首轮链） */
   const [autoRound, setAutoRound] = useState(0)
+  /** 手动刷新次数：>0 时给 URL 追加 rr=N 破缓存，确保发出全新请求 */
+  const [bust, setBust] = useState(0)
 
   const srcIdx = Math.min(stage, Math.max(chain.length - 1, 0))
   let src = proxyImageUrl(chain[srcIdx] ?? "")
-  if (retry) src += `${src.includes("?") ? "&" : "?"}r=1`
+  const params = new URLSearchParams()
+  if (retry) params.set("r", "1")
+  if (bust > 0) params.set("rr", String(bust))
+  const qs = params.toString()
+  if (qs) src += `${src.includes("?") ? "&" : "?"}${qs}`
 
   const handleError = () => {
     if (stage < chain.length - 1) {
@@ -85,7 +94,7 @@ export function WallpaperImage({
     if (autoRound >= AUTO_RETRY_DELAYS.length) onGiveUp?.()
   }
 
-  // 失败后退避自动重试：4s → 12s 两轮，之后才定格为「加载失败」
+  // 失败后退避自动重试：4s → 12s → 30s 三轮，之后才定格为「加载失败」
   useEffect(() => {
     if (!failed || autoRound >= AUTO_RETRY_DELAYS.length) return
     const t = setTimeout(() => {
@@ -93,6 +102,8 @@ export function WallpaperImage({
       setFailed(false)
       setRetry(false)
       setStage(0)
+      // 新一轮换全新破缓存参数：不与上一轮的失败响应撞 URL
+      setBust((n) => n + 1)
     }, AUTO_RETRY_DELAYS[autoRound])
     return () => clearTimeout(t)
   }, [failed, autoRound])
@@ -103,7 +114,9 @@ export function WallpaperImage({
   if (prevReloadKey !== reloadKey) {
     setPrevReloadKey(reloadKey)
     if (!loaded) {
-      // 已加载成功的图不受影响（不闪烁、不重请求）
+      // 已加载成功的图不受影响（不闪烁、不重请求）；
+      // bust+1 确保这次重试不是被缓存的失败响应
+      setBust((n) => n + 1)
       setAutoRound(0)
       setFailed(false)
       setRetry(false)
@@ -113,7 +126,6 @@ export function WallpaperImage({
 
   return (
     <>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={failed ? undefined : src}
         alt={alt}

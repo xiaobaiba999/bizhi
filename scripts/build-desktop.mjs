@@ -1,13 +1,26 @@
 #!/usr/bin/env node
 /**
- * 壁纸工坊 · 桌面版打包流水线
+ * 壁纸工坊 · Windows 桌面版构建编排
  *
- * 用法（在项目根目录执行）：
- *   node scripts/build-desktop.mjs --assemble   生产构建 Next(standalone) + 组装 release/resources
- *   node scripts/build-desktop.mjs --linux      组装 + Linux 解包版（本地冒烟测试）
- *   node scripts/build-desktop.mjs --win        组装 + Windows NSIS 安装包（exe）
+ * 用法：
+ *   node scripts/build-desktop.mjs render   # 只构建渲染层 → desktop/renderer/
+ *   node scripts/build-desktop.mjs dist     # 只打包（需先 render）
+ *   node scripts/build-desktop.mjs          # render + dist 一条龙
  *
- * 环境说明：沙箱通过 npmmirror 镜像下载 Electron 与 NSIS 工具链
+ * render 阶段（复用 gh-pages 构建的成熟模式）：
+ *   1. 暂移 src/app/api（静态导出不支持路由处理器）
+ *   2. next build 静态导出（无 basePath、NEXT_PUBLIC_DESKTOP=1、独立 distDir，
+ *      不影响 dev 服务器的 .next）
+ *   3. 产物拷贝 desktop/renderer/，恢复 api 与 tsconfig（finally 兜底）
+ *
+ * dist 阶段：
+ *   desktop/ 下 npm install（首次）+ electron-builder --win nsis --x64
+ *   → release/desktop/WallpaperWorkshop-Setup-v<版本>.exe
+ *
+ * 网络说明（沙箱实测）：
+ *   - npm 走 npmmirror registry（快）
+ *   - Electron 二进制 / electron-builder 的 NSIS 工具链走 npmmirror 镜像
+ *     （ELECTRON_MIRROR / ELECTRON_BUILDER_BINARIES_MIRROR）
  */
 
 import { spawnSync } from "node:child_process";
@@ -16,259 +29,140 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DIST = path.join(ROOT, ".next-desktop");
-const SERVER_OUT = path.join(ROOT, "release", "resources", "server");
-const EMPTY_DB = path.join(ROOT, "release", "resources", "empty.db");
+const APP_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
+const DESKTOP_DIR = path.join(ROOT, "desktop");
+const RENDERER_DIR = path.join(DESKTOP_DIR, "renderer");
+const API_DIR = path.join(ROOT, "src", "app", "api");
+const API_STASH = path.join(ROOT, ".api-stash");
+const DIST_DIR_NAME = ".desktop-render-build";
+const RELEASE_DIR = path.join(ROOT, "release", "desktop");
+const EXE_PATH = path.join(RELEASE_DIR, `WallpaperWorkshop-Setup-v${APP_VERSION}.exe`);
 
+/** npmmirror 镜像环境（Electron / electron-builder 二进制下载） */
 const MIRROR_ENV = {
-  ELECTRON_MIRROR: "https://registry.npmmirror.com/-/binary/electron/",
-  ELECTRON_BUILDER_BINARIES_MIRROR: "https://registry.npmmirror.com/-/binary/electron-builder-binaries/",
-  CSC_IDENTITY_AUTO_DISCOVERY: "false",
+  ELECTRON_MIRROR: "https://npmmirror.com/mirrors/electron/",
+  ELECTRON_BUILDER_BINARIES_MIRROR: "https://npmmirror.com/mirrors/electron-builder-binaries/",
 };
 
-const step = (msg) => console.log(`\n\x1b[35m[desktop-build]\x1b[0m ${msg}`);
+const mode = process.argv[2] || "all";
+const step = (msg) => console.log(`\n[desktop] ${msg}`);
 
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { stdio: "inherit", cwd: ROOT, ...opts });
   if (r.status !== 0) {
-    console.error(`\x1b[31m[desktop-build] 命令失败: ${cmd} ${args.join(" ")}\x1b[0m`);
-    process.exit(r.status ?? 1);
+    throw new Error(`命令失败: ${cmd} ${args.join(" ")}（exit ${r.status}）`);
   }
 }
 
-function sizeMB(p) {
-  const walk = (dir) => {
-    let total = 0;
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) total += walk(full);
-      else total += fs.statSync(full).size;
-    }
-    return total;
-  };
-  const stat = fs.statSync(p);
-  return (stat.isDirectory() ? walk(p) : stat.size) / 1024 / 1024;
-}
-
-/* ---------- ① 生产构建（standalone，独立 distDir，不影响 dev:3000） ---------- */
-
-function buildNext() {
-  step("Next.js 生产构建（standalone → .next-desktop）");
-  run("node", [path.join(ROOT, "node_modules", "next", "dist", "bin", "next"), "build"], {
-    env: {
-      ...process.env,
-      NEXT_OUTPUT_STANDALONE: "1",
-      NEXT_DIST_DIR: ".next-desktop",
-    },
-  });
-}
-
-/* ---------- ② 组装 release/resources ---------- */
-
-function assemble() {
-  step("组装桌面版资源（Next 服务器 + 静态资源 + Prisma 引擎 + 空数据库模板）");
-
-  fs.rmSync(path.join(ROOT, "release", "resources"), { recursive: true, force: true });
-  fs.mkdirSync(SERVER_OUT, { recursive: true });
-
-  // 精简 app 壳（独立 package.json、无 dependencies → asar 不打进 node_modules）
-  const appDir = path.join(ROOT, "release", "app");
-  fs.rmSync(appDir, { recursive: true, force: true });
-  fs.mkdirSync(path.join(appDir, "desktop"), { recursive: true });
-  const rootPkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-  fs.writeFileSync(
-    path.join(appDir, "package.json"),
-    JSON.stringify(
-      {
-        name: rootPkg.name,
-        productName: "壁纸工坊",
-        version: rootPkg.version,
-        description: rootPkg.description,
-        author: rootPkg.author,
-        license: "MIT",
-        main: "desktop/main.js",
-      },
-      null,
-      2
-    )
-  );
-  fs.copyFileSync(path.join(ROOT, "desktop", "main.js"), path.join(appDir, "desktop", "main.js"));
-  fs.copyFileSync(
-    path.join(ROOT, "desktop", "preload.js"),
-    path.join(appDir, "desktop", "preload.js")
-  );
-
-  // Next standalone 服务器
-  fs.cpSync(path.join(DIST, "standalone"), SERVER_OUT, { recursive: true });
-  // Next standalone 会把项目根下的杂项几乎全量复制进来，全部清掉：
-  // - skills / upload / download / tool-results / build / scripts / release：
-  //   开发环境文件与旧构建产物（曾使安装包虚胖 60MB+ 并逐轮滚雪球）
-  // - src / prisma：已编译进 server.js（数据库修补用 instrumentation 内嵌 SQL，
-  //   运行时不需要源码与 schema）
-  // - bun.lock / 各类文档与配置残留
-  // - db：桌面版数据库由主进程用 empty.db 模板在用户数据目录创建（护送/修补逻辑），
-  //   这里的 custom.db 是构建机的测试数据（含下载记录），绝不能进安装包
-  // 保留：server.js / package.json / node_modules / .next-desktop(static) / public
-  for (const junk of [
-    "skills",
-    "upload",
-    "download",
-    "tool-results",
-    "build",
-    "scripts",
-    "release",
-    "src",
-    "prisma",
-    "desktop",
-    "db",
-    "bun.lock",
-    "dev.log",
-    "build-desktop.log",
-    "release-upload.log",
-    "AGENTS.md",
-    "GITHUB_DEPLOY.md",
-    "README.md",
-    "eslint.config.mjs",
-    "components.json",
-    "tsconfig.json",
-    "next.config.ts",
-    "electron-builder.yml",
-  ]) {
-    fs.rmSync(path.join(SERVER_OUT, junk), { recursive: true, force: true });
+function moveDir(from, to) {
+  if (fs.existsSync(to)) {
+    throw new Error(`目标已存在: ${to}（上次构建异常残留，请确认后手动删除再试）`);
   }
-  // 客户端静态资源：自定义 distDir 为 .next-desktop → static 须放在 server/.next-desktop/static
-  // （standalone 服务器按 next.config 里烘焙的 distDir 解析 /_next/static 的磁盘位置）
-  fs.cpSync(path.join(DIST, "static"), path.join(SERVER_OUT, ".next-desktop", "static"), {
-    recursive: true,
-  });
-  // public 静态资源（排除 desktop/ —— 桌面版无需内嵌自己的安装包，避免 167MB 递归膨胀）
-  if (fs.existsSync(path.join(ROOT, "public"))) {
-    const publicSrc = path.join(ROOT, "public");
-    fs.cpSync(publicSrc, path.join(SERVER_OUT, "public"), {
-      recursive: true,
-      filter: (src) => {
-        const rel = path.relative(publicSrc, src);
-        return !(rel === "desktop" || rel.startsWith("desktop" + path.sep));
+  fs.renameSync(from, to);
+}
+
+/** 导出构建期间给 tsconfig 追加 exclude（同 build-gh-pages.mjs 的处理） */
+function patchTsconfigForExport() {
+  const TSCONFIG = path.join(ROOT, "tsconfig.json");
+  const raw = fs.readFileSync(TSCONFIG, "utf8");
+  const json = JSON.parse(raw);
+  const extra = [".next", DIST_DIR_NAME, "out", ".api-stash", "tool-results", "desktop"];
+  json.exclude = [...new Set([...(json.exclude ?? []), ...extra])];
+  fs.writeFileSync(TSCONFIG, JSON.stringify(json, null, 2) + "\n");
+  return raw;
+}
+
+/* ------------------------------ 渲染层构建 ------------------------------ */
+
+function buildRenderer() {
+  step(`① 移走 src/app/api（静态导出不支持路由处理器）`);
+  moveDir(API_DIR, API_STASH);
+
+  let tsconfigOriginal;
+  try {
+    tsconfigOriginal = patchTsconfigForExport();
+
+    step(`② Next.js 静态导出（无 basePath · NEXT_PUBLIC_DESKTOP=1 · v${APP_VERSION}）`);
+    fs.rmSync(path.join(ROOT, DIST_DIR_NAME), { recursive: true, force: true });
+    run("node", [path.join(ROOT, "node_modules", "next", "dist", "bin", "next"), "build"], {
+      env: {
+        ...process.env,
+        NEXT_OUTPUT_EXPORT: "1",
+        NEXT_DIST_DIR: DIST_DIR_NAME,
+        NEXT_PUBLIC_DESKTOP: "1",
       },
     });
-  }
 
-  // 清掉可能被带进去的 .env（数据库路径由桌面主进程以环境变量注入）
-  for (const f of fs.readdirSync(SERVER_OUT)) {
-    if (f.startsWith(".env")) fs.rmSync(path.join(SERVER_OUT, f), { force: true });
-  }
-
-  // 确保 Prisma 双平台引擎在服务器 node_modules 内（含 Windows dll）
-  const srcClient = path.join(ROOT, "node_modules", ".prisma", "client");
-  const destClient = path.join(SERVER_OUT, "node_modules", ".prisma", "client");
-  if (!fs.existsSync(destClient)) fs.mkdirSync(destClient, { recursive: true });
-  for (const f of fs.readdirSync(srcClient)) {
-    if (/engine|schema\.prisma|\.wasm|package\.json/.test(f)) {
-      fs.copyFileSync(path.join(srcClient, f), path.join(destClient, f));
+    step(`③ 拷贝产物 → desktop/renderer/`);
+    const out = [path.join(ROOT, DIST_DIR_NAME), path.join(ROOT, "out")].find((p) =>
+      fs.existsSync(path.join(p, "index.html"))
+    );
+    if (!out) throw new Error(`未找到导出 index.html（检查构建日志）`);
+    fs.rmSync(RENDERER_DIR, { recursive: true, force: true });
+    fs.cpSync(out, RENDERER_DIR, { recursive: true });
+    const n = fs.readdirSync(path.join(RENDERER_DIR, "_next")).length;
+    console.log(`    desktop/renderer/ 就绪（_next 下 ${n} 项，index.html ${(fs.statSync(path.join(RENDERER_DIR, "index.html")).size / 1024).toFixed(1)}KB）`);
+  } finally {
+    step(`④ 恢复 src/app/api 与 tsconfig.json`);
+    if (fs.existsSync(API_STASH)) {
+      fs.rmSync(API_DIR, { recursive: true, force: true });
+      fs.renameSync(API_STASH, API_DIR);
+    }
+    if (tsconfigOriginal !== undefined) {
+      fs.writeFileSync(path.join(ROOT, "tsconfig.json"), tsconfigOriginal);
     }
   }
-  console.log(
-    "  Prisma 引擎:",
-    fs
-      .readdirSync(destClient)
-      .filter((f) => f.includes("engine"))
-      .join(", ")
-  );
-
-  // 全新空数据库模板（仅表结构）：用 prisma db push 生成
-  step("生成空数据库模板 empty.db");
-  fs.rmSync(EMPTY_DB, { force: true });
-  run("node", [path.join(ROOT, "node_modules", "prisma", "build", "index.js"), "db", "push", "--skip-generate"], {
-    env: { ...process.env, DATABASE_URL: `file:${EMPTY_DB.replace(/\\/g, "/")}` },
-  });
-
-  console.log(`  服务器体积: ${sizeMB(SERVER_OUT).toFixed(1)} MB`);
 }
 
-/* ---------- ③ electron-builder ---------- */
+/* -------------------------------- 打包 -------------------------------- */
 
-/** 给 electron-builder 打补丁：Linux 上用原生 UninstallerReader 提取卸载器（免 wine，幂等） */
-function patchElectronBuilder() {
-  const file = path.join(
-    ROOT,
-    "node_modules",
-    "app-builder-lib",
-    "out",
-    "targets",
-    "nsis",
-    "NsisTarget.js"
+function buildDist() {
+  if (!fs.existsSync(path.join(RENDERER_DIR, "index.html"))) {
+    throw new Error(`缺少 ${path.relative(ROOT, RENDERER_DIR)}/index.html，请先执行 render 阶段`);
+  }
+  if (!fs.existsSync(path.join(DESKTOP_DIR, "build", "icon.ico"))) {
+    step(`⓪ 生成应用图标（首次）`);
+    run("node", [path.join(ROOT, "scripts", "make-desktop-icon.mjs")]);
+  }
+
+  step(`⑤ desktop/ 安装依赖（首次较慢：Electron + electron-builder）`);
+  if (!fs.existsSync(path.join(DESKTOP_DIR, "node_modules"))) {
+    run("npm", ["install", "--no-audit", "--no-fund", "--registry=https://registry.npmmirror.com"], {
+      cwd: DESKTOP_DIR,
+      env: { ...process.env, ...MIRROR_ENV },
+    });
+  } else {
+    console.log("    node_modules 已存在，跳过（删除后重跑可强制更新）");
+  }
+
+  if (process.platform !== "win32") {
+    step(`⑤½ 修补 electron-builder：Linux 无 wine 时的卸载程序提取`);
+    run("node", [path.join(ROOT, "scripts", "patch-electron-builder-linux.mjs")]);
+  }
+
+  step(`⑥ electron-builder 构建 Windows NSIS 安装包（x64）`);
+  run(
+    process.platform === "win32" ? "node_modules\\.bin\\electron-builder.cmd" : "node_modules/.bin/electron-builder",
+    ["--win", "nsis", "--x64"],
+    { cwd: DESKTOP_DIR, env: { ...process.env, ...MIRROR_ENV } }
   );
-  if (!fs.existsSync(file)) return;
-  let src = fs.readFileSync(file, "utf8");
-  const marker = "PATCH(desktop-build)";
-  if (src.includes(marker)) return;
-  const target = `if ((0, macosVersion_1.isMacOsCatalina)()) {`;
-  if (!src.includes(target)) {
-    console.warn("[desktop-build] 警告: 未找到 NsisTarget wine 分支，补丁未应用（electron-builder 版本可能已变化）");
+
+  if (!fs.existsSync(EXE_PATH)) {
+    // 容错：找一下 release/desktop 下的实际 exe
+    const found = fs
+      .readdirSync(RELEASE_DIR)
+      .filter((f) => f.endsWith(".exe"))
+      .map((f) => path.join(RELEASE_DIR, f));
+    if (found.length === 0) throw new Error(`未找到产物 exe（期望 ${EXE_PATH}）`);
+    console.log(`    产物: ${found.join(" , ")}`);
     return;
   }
-  src = src.replace(
-    target,
-    `// ${marker}: Linux 无 wine 环境下改用原生 UninstallerReader 提取卸载器\n        if ((0, macosVersion_1.isMacOsCatalina)() || process.platform === "linux") {`
-  );
-  fs.writeFileSync(file, src);
-  console.log("[desktop-build] 已应用 electron-builder 免 wine 补丁");
+  const mb = (fs.statSync(EXE_PATH).size / 1024 / 1024).toFixed(1);
+  console.log(`\n[desktop] 完成 ✔  ${path.relative(ROOT, EXE_PATH)}（约 ${mb} MB）`);
+  console.log(`后续：node scripts/upload-release-desktop.mjs <token>  → Release v${APP_VERSION}`);
 }
 
-function packageLinux() {
-  step("打包 Linux 解包版（本地冒烟测试用）");
-  patchElectronBuilder();
-  run("node", [path.join(ROOT, "node_modules", "electron-builder", "out", "cli", "cli.js"), "--linux", "dir", "--x64"], {
-    env: { ...process.env, ...MIRROR_ENV },
-  });
-}
+/* -------------------------------- 入口 -------------------------------- */
 
-function packageWin() {
-  step("交叉打包 Windows NSIS 安装包（exe）");
-  patchElectronBuilder();
-  run("node", [path.join(ROOT, "node_modules", "electron-builder", "out", "cli", "cli.js"), "--win", "nsis", "--x64"], {
-    env: { ...process.env, ...MIRROR_ENV },
-  });
-}
-
-/* ---------- main ---------- */
-
-const args = process.argv.slice(2);
-const wantAssemble = args.includes("--assemble");
-const wantLinux = args.includes("--linux");
-const wantWin = args.includes("--win");
-
-if (!wantAssemble && !wantLinux && !wantWin) {
-  console.log("用法: node scripts/build-desktop.mjs --assemble | --linux | --win");
-  process.exit(0);
-}
-
-// 构建前清理（v1.4.4）：Next standalone 会把项目根当时的内容几乎全量复制进
-// .next-desktop/standalone —— 若上一轮产物 release/out（数百 MB）还在，
-// 会被递归嵌套进安装包里，每构建一轮体积滚一次雪球。
-// 开工先把旧构建目录与旧产物清干净，保证 standalone 复制到的是干净项目。
-fs.rmSync(path.join(ROOT, "release", "out"), { recursive: true, force: true });
-fs.rmSync(path.join(ROOT, ".next-desktop"), { recursive: true, force: true });
-
-// WF_SKIP_NEXT_BUILD=1：.next-desktop 已存在时跳过生产构建（分步构建用）
-if (process.env.WF_SKIP_NEXT_BUILD !== "1") {
-  buildNext();
-} else {
-  step("跳过 Next.js 生产构建（WF_SKIP_NEXT_BUILD=1）");
-  if (!fs.existsSync(path.join(DIST, "standalone", "server.js"))) {
-    console.error("[desktop-build] .next-desktop/standalone 不存在，无法跳过构建");
-    process.exit(1);
-  }
-}
-assemble();
-if (wantLinux) packageLinux();
-if (wantWin) packageWin();
-
-step("完成 ✔");
-const outDir = path.join(ROOT, "release", "out");
-if (fs.existsSync(outDir)) {
-  for (const f of fs.readdirSync(outDir)) {
-    const full = path.join(outDir, f);
-    console.log(`  产物: ${f} (${sizeMB(full).toFixed(1)} MB)`);
-  }
-}
+if (mode === "render" || mode === "all") buildRenderer();
+if (mode === "dist" || mode === "all") buildDist();

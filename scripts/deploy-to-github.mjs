@@ -6,7 +6,7 @@
  *   本沙箱网络策略只放行 api.github.com（REST API），github.com 的
  *   git-receive-pack 通道（git push）会被挂起阻断。因此改走 Git Data API：
  *   逐文件建 blob → 建整棵 tree（不带 base_tree = 镜像替换，旧文件自动清除）
- *   → 建 commit → 建/推 main 分支 → 开启 Pages。全部通过 api.github.com 完成。
+ *   → 建 commit → 推/建 main 分支 → 确认 Pages 开启。全部通过 api.github.com 完成。
  *
  * 用法（项目根目录执行）：
  *   node scripts/deploy-to-github.mjs <token>     # 直接传 token
@@ -63,7 +63,7 @@ if (!token) {
 
 const step = (msg) => console.log(`\n[deploy] ${msg}`);
 
-async function api(method, urlPath, body, { ok404 = false, raw = false } = {}) {
+async function api(method, urlPath, body, { ok404 = false } = {}) {
   const res = await fetch(`${API}${urlPath}`, {
     method,
     headers: {
@@ -89,7 +89,6 @@ async function api(method, urlPath, body, { ok404 = false, raw = false } = {}) {
     const text = await res.text();
     throw new Error(`${method} ${urlPath} → HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
-  if (raw) return { status: res.status, data: await res.arrayBuffer() };
   return { status: res.status, data: res.status === 204 ? null : await res.json() };
 }
 
@@ -181,7 +180,7 @@ async function main() {
   });
   console.log(`    tree: ${tree.data.sha}`);
 
-  step("④ 查询当前 main 分支（空仓库则无父提交）");
+  step(`④ 查询当前 ${BRANCH} 分支（空仓库则无父提交）`);
   const head = await apiRetry("GET", `/repos/${OWNER}/${REPO}/git/ref/heads/${BRANCH}`, undefined, {
     ok404: true,
   });
@@ -191,7 +190,9 @@ async function main() {
   step("⑤ 创建提交");
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
   const commit = await apiRetry("POST", `/repos/${OWNER}/${REPO}/git/commits`, {
-    message: `deploy 壁纸工坊 网页版 → ${SITE_URL}（${stamp} UTC，${files.length} 文件）`,
+    message: `deploy 壁纸工坊 网页版 v${JSON.parse(
+      fs.readFileSync(path.join(ROOT, "package.json"), "utf8")
+    ).version} → ${SITE_URL}（${stamp} UTC，${files.length} 文件）`,
     tree: tree.data.sha,
     ...(parentSha ? { parents: [parentSha] } : {}),
   });
@@ -211,7 +212,7 @@ async function main() {
   }
   console.log(`    ${BRANCH} → ${commit.data.sha.slice(0, 10)} ✔`);
 
-  step("⑦ 开启 GitHub Pages（main 分支根目录）");
+  step(`⑦ 确认 GitHub Pages（${BRANCH} 分支根目录）`);
   const pages = await apiRetry("GET", `/repos/${OWNER}/${REPO}/pages`, undefined, { ok404: true });
   if (pages.data) {
     console.log(`    Pages 已启用：${pages.data.html_url}（本次推送后约 1 分钟内更新）`);
