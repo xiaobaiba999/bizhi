@@ -63,11 +63,12 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "upload/**",
     "mini-services/**",
     ".zscripts/**",
-    // 桌面版（Electron）：主进程为 CommonJS 脚本不走 Next 规则，
+    // 桌面版（Electron）：主进程 / preload 为 CommonJS 脚本不走 Next 规则，
     // renderer/ 为构建产物、node_modules 为本地依赖
     "desktop/renderer/**",
     "desktop/node_modules/**",
     "desktop/main.js",
+    "desktop/preload.js",
     ".desktop-render-build/**",
   ]
 }];

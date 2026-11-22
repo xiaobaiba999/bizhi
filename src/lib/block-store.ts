@@ -1,9 +1,14 @@
 /**
- * 壁纸工坊 · 屏蔽记录本地存储（localStorage）
+ * 壁纸工坊 · 屏蔽记录本地存储
  *
- * 静态版（GitHub Pages 纯静态托管）的主存储：
- * 屏蔽过的壁纸 id 永久记在本浏览器，之后永久不再显示。
+ * 双模式（v1.4.8）：
+ * - 桌面版（Electron，preload 桥存在）：文件真源 userData/ww-store.json
+ *   （升级换版不丢；localStorage 降级为镜像），首次运行自动迁移旧记录；
+ * - 网页版（GitHub Pages 纯静态）：localStorage 为主存储（原行为不变）。
+ * 屏蔽过的壁纸 id 永久记录，之后不再显示。
  */
+
+import { desktopBridge, desktopRead, desktopWrite } from "@/lib/desktop-store"
 
 const KEY = "ww-blocked-v1"
 
@@ -15,6 +20,8 @@ export interface BlockedRecord {
 }
 
 function read(): BlockedRecord[] {
+  // 桌面版：文件真源（内存镜像，由 desktop-store 统一懒加载/迁移）
+  if (desktopBridge) return (desktopRead("blocked") as BlockedRecord[]) ?? []
   try {
     const raw = localStorage.getItem(KEY)
     if (!raw) return []
@@ -30,8 +37,14 @@ function read(): BlockedRecord[] {
 }
 
 function write(items: BlockedRecord[]) {
+  const trimmed = items.slice(-5000)
+  if (desktopBridge) {
+    // 文件真源 + localStorage 镜像（desktopWrite 内部双写）
+    desktopWrite("blocked", trimmed)
+    return
+  }
   try {
-    localStorage.setItem(KEY, JSON.stringify(items.slice(-5000)))
+    localStorage.setItem(KEY, JSON.stringify(trimmed))
   } catch {
     // 忽略
   }
@@ -53,6 +66,15 @@ export function recordLocalBlock(w: { id: string; title: string; src: string }):
 
 /** 清空屏蔽记录 */
 export function clearLocalBlocked() {
+  if (desktopBridge) {
+    desktopWrite("blocked", []) // 文件真源同步清空（清空后重启不会再冒回来）
+    try {
+      localStorage.removeItem(KEY)
+    } catch {
+      // 忽略
+    }
+    return
+  }
   try {
     localStorage.removeItem(KEY)
   } catch {

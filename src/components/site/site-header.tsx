@@ -14,7 +14,7 @@ export function SiteHeader() {
           </span>
           <span className="text-base font-black tracking-tight">壁纸工坊</span>
           <span className="rounded-full border px-1.5 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.7 桌面版
+            v1.4.8 桌面版
           </span>
         </Link>
         <nav aria-label="主导航" className="flex items-center gap-1 text-xs font-semibold">
