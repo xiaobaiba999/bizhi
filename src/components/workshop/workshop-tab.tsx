@@ -31,6 +31,7 @@ import {
   prepareWallpaperBlob,
   saveBlobViaAnchor,
 } from "@/lib/workshop-source"
+import { desktopBridge } from "@/lib/desktop-store"
 import { SelectionPanel } from "@/components/workshop/selection-panel"
 import { WallpaperImage } from "@/components/workshop/wallpaper-image"
 import {
@@ -86,6 +87,8 @@ export function WorkshopTab() {
   const [downloadedCount, setDownloadedCount] = useState(0)
   /** 屏蔽记录数（屏蔽过的永久不再显示） */
   const [blockedCount, setBlockedCount] = useState(0)
+  /** 桌面版：当前壁纸保存目录（自主选择；初始 null 载入中） */
+  const [saveDir, setSaveDir] = useState<string | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -340,13 +343,28 @@ export function WorkshopTab() {
     setTimeout(() => frame.remove(), 600_000)
   }
 
-  /** 打开下载说明 */
+  /** 打开下载说明 / 选择保存位置（桌面版：弹目录选择框，选择即生效并记忆） */
   const handleOpenDownloads = async () => {
-    if (IS_DESKTOP) {
-      toast.info("壁纸自动保存到「图片 / WallpaperWorkshop」文件夹", {
-        description: "保存完成后会弹出通知；也可在菜单「文件 → 打开保存文件夹」中查看。",
-        duration: 5000,
-      })
+    if (IS_DESKTOP && desktopBridge) {
+      try {
+        const dir = await desktopBridge.selectSaveDir()
+        if (dir) {
+          setSaveDir(dir)
+          toast.success("保存位置已更新", {
+            description: `以后壁纸将下载到：${dir}`,
+            duration: 6000,
+          })
+        } else {
+          toast.info("当前保存位置", {
+            description: saveDir
+              ? `${saveDir}（可点菜单「文件 → 选择保存位置」修改）`
+              : "默认「图片 / WallpaperWorkshop」（点「下载位置」重新选择）",
+            duration: 5000,
+          })
+        }
+      } catch {
+        toast.error("选择保存位置失败，请稍后重试")
+      }
       return
     }
     toast.info("壁纸由浏览器保存到「下载」文件夹", {
@@ -354,6 +372,21 @@ export function WorkshopTab() {
       duration: 5000,
     })
   }
+
+  /** 桌面版启动时载入当前保存目录（页头展示） */
+  useEffect(() => {
+    if (!IS_DESKTOP || !desktopBridge) return
+    let alive = true
+    desktopBridge
+      .getSaveDir()
+      .then((d) => {
+        if (alive && typeof d === "string") setSaveDir(d)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
 
   /** 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再排队回源），
    *  18 张全部铺开也不会挤占缩略图代理的带宽 */
@@ -437,15 +470,22 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.7 桌面版
+            v1.4.8 桌面版
           </span>
           <button
             type="button"
             onClick={() => void handleOpenDownloads()}
-            className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+            title={saveDir ?? "点击选择壁纸保存位置（桌面版）"}
+            className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
           >
-            <FolderOpen className="size-3.5" />
-            下载位置
+            <FolderOpen className="size-3.5 shrink-0" />
+            <span className="max-w-[220px] truncate">
+              {IS_DESKTOP
+                ? saveDir
+                  ? `保存位置：${saveDir.split("\\").pop()?.split("/").pop() || saveDir}`
+                  : "选择保存位置"
+                : "下载位置"}
+            </span>
           </button>
         </div>
         <p className="text-sm leading-relaxed text-muted-foreground">
@@ -460,6 +500,7 @@ export function WorkshopTab() {
             哲风壁纸
           </a>
           ，下载原图；下载过的自动隐藏，屏蔽的永久不再出现
+          {IS_DESKTOP ? "（记录存本地数据文件，升级新版本不丢）" : ""}
         </p>
       </div>
 

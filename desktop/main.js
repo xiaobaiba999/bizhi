@@ -6,9 +6,13 @@
  *
  * 关键设计：
  * - app:// 自定义标准协议加载本地渲染层（而非 file://）：
- *   ① origin 固定为 app://local，localStorage（下载/屏蔽记录）跨次启动稳定
+ *   ① origin 固定为 app://local，localStorage 跨次启动稳定
  *   ② 绝对路径 /_next/... 按 http 语义解析，无需相对路径改写
+ * - v1.4.8 记录文件真源：屏蔽/下载记录同步镜像到 userData/ww-store.json
+ *   （preload 桥双向同步；localStorage 损坏/丢失时从文件完整恢复），
+ *   跨版本升级永不丢，退出前强制落盘
  * - 下载接管（will-download）：壁纸自动保存到「图片/WallpaperWorkshop」，
+ *   也支持用户自主选择保存目录（userData/ww-settings.json 记忆）；
  *   批量下载不弹对话框；完成弹系统通知，点击通知打开保存文件夹
  * - 外链（target=_blank）一律走系统默认浏览器，不在应用内开新窗
  * - 记忆窗口位置与大小（userData/window-state.json）
@@ -16,12 +20,13 @@
 
 "use strict";
 
-const { app, BrowserWindow, Menu, dialog, Notification, protocol, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, Notification, ipcMain, protocol, session, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 
 const APP_DIR = __dirname;
 const RENDERER_DIR = path.join(APP_DIR, "renderer");
+const PRELOAD_JS = path.join(APP_DIR, "preload.js");
 const ICON_PNG = path.join(APP_DIR, "build", "icon.png");
 const APP_VERSION = require("./package.json").version;
 const SAVE_DIR_NAME = "WallpaperWorkshop";
@@ -31,6 +36,8 @@ const SMOKE = process.env.WW_SMOKE === "1";
 if (SMOKE) {
   app.commandLine.appendSwitch("no-sandbox");
   app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-dev-shm-usage"); // 容器常无 /dev/shm
+  app.commandLine.appendSwitch("no-zygote"); // 容器 zygote mount ns 隔离会让 /tmp 不可见
 }
 
 /* ------------------------------- 小工具 ------------------------------- */
@@ -61,8 +68,17 @@ const MIME = {
 const notFound = () =>
   new Response("Not Found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
 
-/** 壁纸保存目录（图片/WallpaperWorkshop，异常时回退「下载」） */
+/** 壁纸保存目录：用户自定义优先（settings 记忆）；默认「图片/WallpaperWorkshop」 */
 function getSaveDir() {
+  const custom = readSettings().saveDir;
+  if (typeof custom === "string" && custom.trim()) {
+    try {
+      fs.mkdirSync(custom, { recursive: true });
+      return custom;
+    } catch {
+      /* 自定义目录失效（被删/无权限）→ 回退默认 */
+    }
+  }
   const base = (() => {
     try {
       return app.getPath("pictures");
@@ -87,6 +103,94 @@ function uniqueSavePath(dir, filename) {
   }
   return path.join(dir, `${Date.now()}-${filename}`);
 }
+
+/* ----------------------- 记录真源与设置（v1.4.8） ----------------------- */
+
+const USER_DATA = () => app.getPath("userData");
+const STORE_FILE = () => path.join(USER_DATA(), "ww-store.json");
+const SETTINGS_FILE = () => path.join(USER_DATA(), "ww-settings.json");
+
+/** 记录真源写防抖：合并高频变更，退出前 flush 强制落盘 */
+let pendingStoreJson = null;
+let storeFlushTimer = null;
+
+function flushStoreNow() {
+  if (pendingStoreJson === null) return;
+  const json = pendingStoreJson;
+  pendingStoreJson = null;
+  try {
+    fs.mkdirSync(USER_DATA(), { recursive: true });
+    const tmp = STORE_FILE() + ".tmp"; // 原子替换：写一半断电不伤旧文件
+    fs.writeFileSync(tmp, json);
+    fs.renameSync(tmp, STORE_FILE());
+  } catch {
+    /* 落盘失败不影响界面（localStorage 仍为镜像） */
+  }
+}
+
+function scheduleStoreFlush(json) {
+  pendingStoreJson = String(json);
+  if (storeFlushTimer) clearTimeout(storeFlushTimer);
+  storeFlushTimer = setTimeout(flushStoreNow, 250);
+  storeFlushTimer.unref?.();
+}
+
+/** 用户设置（当前仅保存目录；空对象 = 全部默认） */
+function readSettings() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE(), "utf8"));
+    return s && typeof s === "object" ? s : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSettings(s) {
+  try {
+    fs.mkdirSync(USER_DATA(), { recursive: true });
+    fs.writeFileSync(SETTINGS_FILE(), JSON.stringify(s, null, 2));
+  } catch {
+    /* 设置写失败仅影响记忆的自定义目录 */
+  }
+}
+
+/** 记录真源 IPC（preload 启动时同步拉取快照） */
+ipcMain.on("ww:read-store", (e) => {
+  try {
+    e.returnValue = fs.readFileSync(STORE_FILE(), "utf8");
+  } catch {
+    e.returnValue = null; // 尚无文件 → 渲染层从 localStorage 一次性迁移
+  }
+});
+
+ipcMain.on("ww:write-store", (_e, json) => {
+  if (typeof json === "string" && json.length < 20_000_000) scheduleStoreFlush(json);
+});
+
+ipcMain.handle("ww:get-save-dir", () => getSaveDir());
+
+ipcMain.handle("ww:open-save-dir", () => shell.openPath(getSaveDir()));
+
+/** 弹出目录选择框；用户确认则记住新目录并返回，取消返回 null */
+async function chooseSaveDir(parentWin) {
+  const r = await dialog.showOpenDialog(parentWin, {
+    title: "选择壁纸保存位置",
+    properties: ["openDirectory", "dontAddToRecent"],
+    defaultPath: getSaveDir(),
+  });
+  const dir = r.canceled ? null : r.filePaths?.[0] || null;
+  if (dir) writeSettings({ ...readSettings(), saveDir: dir });
+  return dir;
+}
+
+ipcMain.handle("ww:select-save-dir", async () => {
+  const [win] = BrowserWindow.getAllWindows();
+  return chooseSaveDir(win);
+});
+
+// 退出前强制把待写的记录真源落盘（防抖漏写兜底）
+app.on("before-quit", flushStoreNow);
+app.on("will-quit", flushStoreNow);
 
 /* --------------------------- app:// 协议（核心） --------------------------- */
 
@@ -219,7 +323,8 @@ function buildMenu(win) {
         "哲风壁纸实时获取与原图下载工具 · Windows 桌面版",
         "",
         `版本：v${APP_VERSION}（Electron ${process.versions.electron} / Chromium ${process.versions.chrome}）`,
-        "壁纸自动保存到「图片 / WallpaperWorkshop」文件夹",
+        "保存位置可自定义（菜单「文件 → 选择保存位置…」），默认「图片 / WallpaperWorkshop」",
+        "屏蔽 / 下载记录存应用本地数据文件，升级新版本不丢",
         "数据实时来自 haowallpaper.com（哲风壁纸），版权归原作者所有",
       ].join("\n"),
       buttons: ["确定", "打开 GitHub"],
@@ -233,7 +338,8 @@ function buildMenu(win) {
     {
       label: "文件(F)",
       submenu: [
-        { label: "打开保存文件夹", accelerator: "CmdOrCtrl+O", click: openSaveDir },
+        { label: "打开保存文件夹", accelerator: "CmdOrCtrl+O", click: () => shell.openPath(getSaveDir()) },
+        { label: "选择保存位置…", click: () => void chooseSaveDir(win) },
         { type: "separator" },
         { label: "重新加载", accelerator: "CmdOrCtrl+R", click: () => win.webContents.reload() },
         { type: "separator" },
@@ -283,6 +389,7 @@ function createWindow() {
     icon: ICON_PNG,
     title: "壁纸工坊",
     webPreferences: {
+      preload: PRELOAD_JS,
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: false,

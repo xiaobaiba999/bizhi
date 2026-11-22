@@ -1,11 +1,14 @@
 /**
- * 壁纸工坊 · 下载记录本地存储（localStorage）
+ * 壁纸工坊 · 下载记录本地存储
  *
- * 静态版（GitHub Pages 纯静态托管）的主存储：
- * 下载过的壁纸 id 永久记在本浏览器（同一浏览器 / PWA 安装内跨会话保留），
- * 「隐藏已下载」过滤与「清空记录」都直接操作这一份。
- * 与服务器版的 SQLite 记录相互独立（不同运行环境）。
+ * 双模式（v1.4.8）：
+ * - 桌面版（Electron）：文件真源 userData/ww-store.json（升级换版不丢），
+ *   localStorage 降级为镜像；首次运行自动迁移 v1.4.7 旧记录；
+ * - 网页版（GitHub Pages）：localStorage 主存储（原行为不变），
+ *   「隐藏已下载」过滤与「清空记录」都直接操作这一份。
  */
+
+import { desktopBridge, desktopRead, desktopWrite } from "@/lib/desktop-store"
 
 const KEY = "ww-downloads-v1"
 
@@ -18,6 +21,8 @@ export interface DownloadRecord {
 }
 
 function read(): DownloadRecord[] {
+  // 桌面版：文件真源（内存镜像，由 desktop-store 统一懒加载/迁移）
+  if (desktopBridge) return (desktopRead("downloads") as DownloadRecord[]) ?? []
   try {
     const raw = localStorage.getItem(KEY)
     if (!raw) return []
@@ -33,8 +38,14 @@ function read(): DownloadRecord[] {
 }
 
 function write(items: DownloadRecord[]) {
+  const trimmed = items.slice(-5000)
+  if (desktopBridge) {
+    // 文件真源 + localStorage 镜像（desktopWrite 内部双写）
+    desktopWrite("downloads", trimmed)
+    return
+  }
   try {
-    localStorage.setItem(KEY, JSON.stringify(items.slice(-5000)))
+    localStorage.setItem(KEY, JSON.stringify(trimmed))
   } catch {
     // 存储满等异常：忽略（过滤功能退化为当次会话，不影响下载本身）
   }
@@ -60,6 +71,15 @@ export function recordLocalDownload(w: { id: string; title: string; src: string 
 
 /** 清空全部下载记录（被隐藏的壁纸恢复显示） */
 export function clearLocalDownloads() {
+  if (desktopBridge) {
+    desktopWrite("downloads", []) // 文件真源同步清空
+    try {
+      localStorage.removeItem(KEY)
+    } catch {
+      // 忽略
+    }
+    return
+  }
   try {
     localStorage.removeItem(KEY)
   } catch {

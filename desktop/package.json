@@ -1,9 +1,9 @@
 {
   "name": "wallpaper-workshop-desktop",
   "productName": "壁纸工坊",
-  "version": "1.4.7",
+  "version": "1.4.8",
   "private": true,
-  "description": "壁纸工坊 Windows 桌面版（Electron 封装：app:// 协议 + 下载接管 + 保存通知）",
+  "description": "壁纸工坊 Windows 桌面版（Electron 封装：app:// 协议 + 下载接管 + 保存通知 + 记录文件真源 + 自定义保存位置）",
   "author": "xiaobaiba999",
   "main": "main.js",
   "scripts": {
@@ -12,7 +12,7 @@
     "dist": "electron-builder --win nsis --x64"
   },
   "devDependencies": {
-    "electron": "^38.2.0",
+    "electron": "^38.8.6",
     "electron-builder": "^26.0.0"
   },
   "build": {
@@ -27,6 +27,7 @@
     },
     "files": [
       "main.js",
+      "preload.js",
       "renderer/**/*",
       "build/icon.ico",
       "build/icon.png"
@@ -36,7 +37,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "WallpaperWorkshop-Setup-${version}.${ext}"

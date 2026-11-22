@@ -15,7 +15,7 @@ export function SiteFooter() {
           </a>
           ，版权归原作者所有
         </p>
-        <p>v1.4.7 桌面版 · Windows 安装包见 Releases</p>
+        <p>v1.4.8 桌面版 · Windows 安装包见 Releases</p>
       </div>
     </footer>
   )
