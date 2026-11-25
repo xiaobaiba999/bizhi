@@ -14,6 +14,17 @@ model Download {
   title     String
   src       String
   wtId      String?
+  /// 下载质量：preview（预览直链约 1100px）| original（令牌换取的官网原图）
+  quality   String   @default("preview")
+  createdAt DateTime @default(now())
+}
+
+// 哲风壁纸登录令牌（仅保存在本地数据库，用于下载原图鉴权）
+model ZfToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  /// 来源说明：manual(手动粘贴) | qrcode(扫码登录)
+  note      String
   createdAt DateTime @default(now())
 }
 

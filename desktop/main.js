@@ -14,6 +14,10 @@
  * - 下载接管（will-download）：壁纸自动保存到「图片/WallpaperWorkshop」，
  *   也支持用户自主选择保存目录（userData/ww-settings.json 记忆）；
  *   批量下载不弹对话框；完成弹系统通知，点击通知打开保存文件夹
+ * - 微信扫码登录（v1.4.9，zf-login.js）：主进程托管哲风壁纸微信登录
+ *   全链路（二维码 dataURL → lp 长轮询 → 官网回调换令牌），令牌持久化在
+ *   ww-settings.json；下载原图走「ALTCHA 人机验证 + getCompleteUrl」拿
+ *   与官网完全一致的原图并直接写入保存目录（无令牌自动回退预览质量）
  * - 外链（target=_blank）一律走系统默认浏览器，不在应用内开新窗
  * - 记忆窗口位置与大小（userData/window-state.json）
  */
@@ -23,6 +27,7 @@
 const { app, BrowserWindow, Menu, dialog, Notification, ipcMain, protocol, session, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createLoginModule } = require("./zf-login.js");
 
 const APP_DIR = __dirname;
 const RENDERER_DIR = path.join(APP_DIR, "renderer");
@@ -188,6 +193,34 @@ ipcMain.handle("ww:select-save-dir", async () => {
   return chooseSaveDir(win);
 });
 
+/* ---------------- 扫码登录 + 原图直存（v1.4.9，主进程托管） ---------------- */
+
+/**
+ * 登录模块（desktop/zf-login.js）：扫码登录 / 令牌存取 / 原图直存。
+ * 令牌持久化在 userData/ww-settings.json（zfToken 字段），跨版本升级永不丢；
+ * 原图直存串行队列，下载字节直接写入壁纸保存目录。
+ */
+const login = createLoginModule({
+  readSettings,
+  writeSettings,
+  getSaveDir,
+  uniqueSavePath,
+});
+
+ipcMain.handle("ww:login-start", () => login.loginStart());
+
+ipcMain.handle("ww:login-poll", (_e, state) => login.loginPoll(state));
+
+ipcMain.handle("ww:login-get-token", () => login.getToken());
+
+ipcMain.handle("ww:login-save-token", (_e, token, source) => login.saveToken(token, source));
+
+ipcMain.handle("ww:login-clear-token", () => login.clearToken());
+
+ipcMain.handle("ww:login-verify", (_e, wtId) => login.verifyToken(wtId));
+
+ipcMain.handle("ww:download-original", (_e, wtId, filename) => login.downloadOriginal(wtId, filename));
+
 // 退出前强制把待写的记录真源落盘（防抖漏写兜底）
 app.on("before-quit", flushStoreNow);
 app.on("will-quit", flushStoreNow);
@@ -338,6 +371,8 @@ function buildMenu(win) {
     {
       label: "文件(F)",
       submenu: [
+        { label: "微信扫码登录…", click: () => { const [w] = BrowserWindow.getAllWindows(); w?.webContents.send("ww:open-login"); } },
+        { type: "separator" },
         { label: "打开保存文件夹", accelerator: "CmdOrCtrl+O", click: () => shell.openPath(getSaveDir()) },
         { label: "选择保存位置…", click: () => void chooseSaveDir(win) },
         { type: "separator" },
@@ -469,6 +504,37 @@ function installSmoke(win) {
           report.sampleText = s.text;
         }
         if (report.images > 0 && report.imagesComplete >= Math.min(report.images, 8)) break;
+      }
+      // 登录弹窗链路验证（WW_SMOKE_LOGIN=1）：点击「扫码登录」→
+      // 主进程 IPC 发起会话 → dataURL 二维码渲染 → 状态文案出现
+      if (process.env.WW_SMOKE_LOGIN === "1") {
+        try {
+          await win.webContents.executeJavaScript(
+            `(() => { [...document.querySelectorAll('button')].find(b => b.textContent.includes('扫码登录'))?.click(); true; })()`,
+            true
+          );
+          for (let i = 0; i < 25; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            const s = await win.webContents
+              .executeJavaScript(
+                `(() => {
+                  const qr = document.querySelector('img[alt="微信扫码登录二维码"]');
+                  return {
+                    dialogOpen: !!document.querySelector('[role=dialog]'),
+                    qrSrc: qr ? qr.src.slice(0, 30) : null,
+                    qrLoaded: qr ? (qr.complete && qr.naturalWidth > 0) : false,
+                    phaseText: (document.querySelector('[role=dialog]')?.innerText || '').slice(0, 80),
+                  };
+                })()`,
+                true
+              )
+              .catch(() => null);
+            if (s) report.login = s;
+            if (s && s.qrLoaded) break;
+          }
+        } catch (e) {
+          report.loginError = String(e && e.message ? e.message : e);
+        }
       }
       const img = await win.webContents.capturePage();
       fs.writeFileSync(out, img.toPNG());

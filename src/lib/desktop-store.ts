@@ -27,6 +27,39 @@ export interface DesktopBridge {
   selectSaveDir(): Promise<string | null>
   /** 在资源管理器中打开保存目录 */
   openSaveDir(): Promise<string>
+
+  /* ---------------- 扫码登录 + 原图下载（v1.4.9，主进程托管） ---------------- */
+
+  /** 发起扫码会话；成功返回二维码 dataURL，失败返回 error 文案 */
+  loginStart(): Promise<{ state: string; qrDataUrl: string } | { error: string }>
+  /** 轮询扫码状态（pending / scanned / ok / expired / error） */
+  loginPoll(state: string): Promise<{ status: string; msg?: string | null }>
+  /** 已存令牌（脱敏展示）；无令牌返回 null */
+  loginGetToken(): Promise<{
+    token: string
+    source: string
+    createdAt: string
+  } | null>
+  /** 保存令牌（扫码自动 / 手动粘贴）；令牌写入 userData 设置文件跨版本持久 */
+  loginSaveToken(token: string, source: "manual" | "qrcode"): Promise<boolean>
+  /** 删除令牌 */
+  loginClearToken(): Promise<boolean>
+  /** 官网实测令牌是否仍有效（true / false / null 无法判定） */
+  loginVerify(wtId: string): Promise<{ valid: boolean | null; msg?: string }>
+  /**
+   * 原图直存：主进程完成 ALTCHA 人机验证 → getCompleteUrl 换官网原图直链 →
+   * 下载字节直接写入壁纸保存目录。无令牌 / 令牌失效返回 ok:false + reason，
+   * 渲染层据此回退 CDN 预览直链并提示重新扫码。
+   */
+  downloadOriginal(wtId: string, filename: string, previewSrc: string): Promise<{
+    ok: boolean
+    quality: "original" | "preview"
+    reason?: "no-token" | "auth-expired" | "error"
+    savedPath?: string
+    msg?: string
+  }>
+  /** 菜单「微信扫码登录…」点击：通知渲染层打开登录弹窗 */
+  onOpenLogin(callback: () => void): void
 }
 
 declare global {
