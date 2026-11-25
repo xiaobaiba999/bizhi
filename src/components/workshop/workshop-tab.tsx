@@ -515,7 +515,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.9 桌面版
+            v1.4.10 桌面版
           </span>
           {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
               纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
