@@ -1,9 +1,9 @@
 {
   "name": "wallpaper-workshop-desktop",
   "productName": "壁纸工坊",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "private": true,
-  "description": "壁纸工坊 Windows 桌面版（Electron 封装：app:// 协议 + 下载接管 + 保存通知 + 记录文件真源 + 自定义保存位置）",
+  "description": "壁纸工坊 Windows 桌面版（Electron 封装：app:// 协议 + 下载接管 + 保存通知 + 记录文件真源 + 自定义保存位置 + 微信扫码登录原图下载）",
   "author": "xiaobaiba999",
   "main": "main.js",
   "scripts": {
@@ -28,6 +28,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "zf-login.js",
       "renderer/**/*",
       "build/icon.ico",
       "build/icon.png"

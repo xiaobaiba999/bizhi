@@ -7,6 +7,9 @@
  *   localStorage 里的旧记录一次性迁移进文件，此后 localStorage 降级为镜像）
  * - persistStore：渲染层每次变更后防抖全量落盘（fire-and-forget）
  * - getSaveDir / selectSaveDir / openSaveDir：壁纸保存位置「自主选择」
+ * - loginStart / loginPoll / loginGetToken / loginSaveToken / loginClearToken /
+ *   loginVerify / downloadOriginal（v1.4.9）：微信扫码登录与原图直存，
+ *   全部由主进程托管（Node 环境无 CORS 限制），令牌持久化在 ww-settings.json
  *
  * 安全：contextIsolation 隔离下仅暴露以下只读/受控方法，页面拿不到 Node 能力。
  */
@@ -36,5 +39,40 @@ contextBridge.exposeInMainWorld("wwDesktop", {
   /** 在系统资源管理器中打开保存目录 */
   openSaveDir() {
     return ipcRenderer.invoke("ww:open-save-dir");
+  },
+
+  /* ---------------- 扫码登录 + 原图下载（v1.4.9） ---------------- */
+
+  /** 发起扫码会话；成功返回 { state, qrDataUrl }，失败返回 { error } */
+  loginStart() {
+    return ipcRenderer.invoke("ww:login-start");
+  },
+  /** 轮询扫码状态（pending / scanned / ok / expired / error） */
+  loginPoll(state) {
+    return ipcRenderer.invoke("ww:login-poll", state);
+  },
+  /** 已存令牌（脱敏）；无令牌返回 null */
+  loginGetToken() {
+    return ipcRenderer.invoke("ww:login-get-token");
+  },
+  /** 保存令牌（扫码自动 / 手动粘贴） */
+  loginSaveToken(token, source) {
+    return ipcRenderer.invoke("ww:login-save-token", token, source);
+  },
+  /** 删除令牌 */
+  loginClearToken() {
+    return ipcRenderer.invoke("ww:login-clear-token");
+  },
+  /** 官网实测令牌是否仍有效（true / false / null 无法判定） */
+  loginVerify(wtId) {
+    return ipcRenderer.invoke("ww:login-verify", wtId);
+  },
+  /** 原图直存：主进程 ALTCHA + getCompleteUrl + 下载写入保存目录 */
+  downloadOriginal(wtId, filename) {
+    return ipcRenderer.invoke("ww:download-original", wtId, filename);
+  },
+  /** 菜单「微信扫码登录…」点击：通知渲染层打开登录弹窗 */
+  onOpenLogin(callback) {
+    ipcRenderer.on("ww:open-login", () => callback());
   },
 });

@@ -10,6 +10,7 @@ import {
   EyeOff,
   Expand,
   FolderOpen,
+  KeyRound,
   RefreshCw,
   Sparkles,
   Trash2,
@@ -30,10 +31,13 @@ import {
   clearAllBlocked,
   prepareWallpaperBlob,
   saveBlobViaAnchor,
+  safeClientName,
 } from "@/lib/workshop-source"
-import { desktopBridge } from "@/lib/desktop-store"
+import { desktopBridge, IS_DESKTOP_BRIDGE } from "@/lib/desktop-store"
+import { recordLocalDownload } from "@/lib/download-store"
 import { SelectionPanel } from "@/components/workshop/selection-panel"
 import { WallpaperImage } from "@/components/workshop/wallpaper-image"
+import { TokenSettingsDialog } from "@/components/workshop/token-settings"
 import {
   Dialog,
   DialogContent,
@@ -89,6 +93,8 @@ export function WorkshopTab() {
   const [blockedCount, setBlockedCount] = useState(0)
   /** 桌面版：当前壁纸保存目录（自主选择；初始 null 载入中） */
   const [saveDir, setSaveDir] = useState<string | null>(null)
+  /** 扫码登录弹窗（v1.4.9：桌面版主进程托管 / 服务器版 API） */
+  const [tokenOpen, setTokenOpen] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -317,13 +323,46 @@ export function WorkshopTab() {
   }
 
   /**
-   * 触发一个下载：服务器版走 /api 代理（隐藏 iframe 导航，服务端落记录）；
-   * 静态版直连 CDN 取 blob 另存（localStorage 落记录）。
+   * 触发一个下载（v1.4.9 三级链路）：
+   * 1. 桌面版（静态导出 + Electron 桥）：优先主进程原图直存
+   *    （令牌 + ALTCHA 人机验证 + getCompleteUrl 换官网原图直接写入保存目录）；
+   *    无令牌 / 令牌失效自动回退 CDN 预览直链（约 1100px）
+   * 2. 静态版（GitHub Pages 无桥）：CDN 预览直链取 blob 另存
+   * 3. 服务器版：/api 代理（隐藏 iframe 导航，服务端同样有令牌原图逻辑）
    */
   const triggerDownload = (w: ZhefengWallpaper) => {
     if (IS_STATIC_EXPORT) {
       void (async () => {
         try {
+          // 桌面版：主进程原图直存（成功则直接写入保存目录并弹系统通知）
+          if (desktopBridge) {
+            try {
+              const r = await desktopBridge.downloadOriginal(
+                w.wtId || w.id,
+                safeClientName(w.title),
+                w.src
+              )
+              if (r.ok) {
+                recordLocalDownload({ id: w.id, title: w.title, src: w.src })
+                if (r.quality === "preview") {
+                  toast.info("已保存（预览质量约 1100px）", {
+                    description: "点页头「扫码登录」获取令牌，即可下载与官网完全一致的原图",
+                    duration: 7000,
+                  })
+                }
+                return
+              }
+              if (r.reason === "auth-expired") {
+                toast.warning("令牌已失效，本次下载为预览质量", {
+                  description: "点页头「扫码登录」重新获取令牌，即刻恢复高清原图",
+                  duration: 8000,
+                })
+              }
+              // no-token / error：静默回退 CDN 预览直链
+            } catch {
+              /* 主进程异常：回退 CDN 预览直链 */
+            }
+          }
           const { blob, filename } = await prepareWallpaperBlob(w)
           saveBlobViaAnchor(filename, blob)
         } catch (e) {
@@ -338,7 +377,7 @@ export function WorkshopTab() {
     frame.style.display = "none"
     frame.src = `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
       w.title
-    )}&id=${encodeURIComponent(w.id)}`
+    )}&id=${encodeURIComponent(w.id)}&wtId=${encodeURIComponent(w.wtId || w.id)}`
     document.body.appendChild(frame)
     setTimeout(() => frame.remove(), 600_000)
   }
@@ -386,6 +425,12 @@ export function WorkshopTab() {
     return () => {
       alive = false
     }
+  }, [])
+
+  /** 桌面版菜单「文件 → 微信扫码登录…」点击：打开登录弹窗 */
+  useEffect(() => {
+    if (!desktopBridge) return
+    desktopBridge.onOpenLogin(() => setTokenOpen(true))
   }, [])
 
   /** 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再排队回源），
@@ -470,8 +515,20 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.8 桌面版
+            v1.4.9 桌面版
           </span>
+          {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
+              纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
+          {(!IS_STATIC_EXPORT || IS_DESKTOP_BRIDGE) && (
+            <button
+              type="button"
+              onClick={() => setTokenOpen(true)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+            >
+              <KeyRound className="size-3.5" />
+              扫码登录
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void handleOpenDownloads()}
@@ -856,6 +913,15 @@ export function WorkshopTab() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* 扫码登录弹窗（v1.4.9）：桌面版主进程 IPC / 服务器版 /api/zf-login */}
+      {(!IS_STATIC_EXPORT || IS_DESKTOP_BRIDGE) && (
+        <TokenSettingsDialog
+          open={tokenOpen}
+          onOpenChange={setTokenOpen}
+          probeWtId={list.items[0]?.wtId ?? list.items[0]?.id ?? null}
+        />
+      )}
 
       {/* 壁纸预览弹窗 */}
       <WallpaperPreviewDialog
