@@ -1,6 +1,6 @@
 {
   "name": "wallpaper-workshop",
-  "version": "1.4.9",
+  "version": "1.4.10",
   "private": true,
   "description": "壁纸工坊 —— 哲风壁纸实时获取与原图下载工具（网页版 / 服务器版 / Windows 桌面版）",
   "scripts": {

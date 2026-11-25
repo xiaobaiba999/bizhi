@@ -19,6 +19,9 @@
  *   ww-settings.json；下载原图走「ALTCHA 人机验证 + getCompleteUrl」拿
  *   与官网完全一致的原图并直接写入保存目录（无令牌自动回退预览质量）
  * - 外链（target=_blank）一律走系统默认浏览器，不在应用内开新窗
+ * - v1.4.10 崩溃可见化：全局 uncaughtException/unhandledRejection → 错误弹窗 +
+ *   写 userData/logs/main.log；启动分步日志；登录模块加载失败自动降级不致命；
+ *   渲染进程崩溃可一键重载；菜单「帮助 → 打开运行日志」
  * - 记忆窗口位置与大小（userData/window-state.json）
  */
 
@@ -27,7 +30,6 @@
 const { app, BrowserWindow, Menu, dialog, Notification, ipcMain, protocol, session, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
-const { createLoginModule } = require("./zf-login.js");
 
 const APP_DIR = __dirname;
 const RENDERER_DIR = path.join(APP_DIR, "renderer");
@@ -44,6 +46,62 @@ if (SMOKE) {
   app.commandLine.appendSwitch("disable-dev-shm-usage"); // 容器常无 /dev/shm
   app.commandLine.appendSwitch("no-zygote"); // 容器 zygote mount ns 隔离会让 /tmp 不可见
 }
+
+/* ------------------- 运行日志 + 崩溃可见化（v1.4.10） ------------------- */
+
+// Windows 通知需要 AUMID 与安装器快捷方式一致，否则可能不弹/图标不对
+try {
+  app.setAppUserModelId("io.github.xiaobaiba999.wallpaperworkshop");
+} catch {
+  /* 老系统无碍 */
+}
+
+const LOG_DIR = () => path.join(app.getPath("userData"), "logs");
+const LOG_FILE = () => path.join(LOG_DIR(), "main.log");
+
+/** 追加一行日志（userData/logs/main.log，超 256KB 环形截断保留后半） */
+function log(line) {
+  try {
+    fs.mkdirSync(LOG_DIR(), { recursive: true });
+    fs.appendFileSync(LOG_FILE(), `[${new Date().toISOString()}] ${line}\n`);
+    try {
+      if (fs.statSync(LOG_FILE()).size > 262_144) {
+        const buf = fs.readFileSync(LOG_FILE());
+        fs.writeFileSync(LOG_FILE(), buf.subarray(buf.length - 131_072));
+      }
+    } catch {
+      /* 截断失败不影响主流程 */
+    }
+  } catch {
+    /* 日志本身绝不抛错 */
+  }
+  if (SMOKE) console.log(`[ww] ${line}`);
+}
+
+/** 把任意异常序列化成可读文本 */
+function errText(e) {
+  return e && e.stack ? String(e.stack) : String(e);
+}
+
+// 全局异常：弹窗 + 日志（弹窗在 app ready 前也可用）
+process.on("uncaughtException", (err) => {
+  const text = errText(err);
+  log(`FATAL uncaughtException: ${text}`);
+  try {
+    dialog.showErrorBox(
+      "壁纸工坊遇到错误",
+      `发生未处理的错误：\n\n${text.slice(0, 600)}\n\n` +
+        `已写入运行日志：\n${LOG_FILE()}\n\n` +
+        `若界面异常请重启应用；问题持续可把日志文件内容反馈给开发者。`
+    );
+  } catch {
+    /* 极端环境下弹窗失败也不叠加崩溃 */
+  }
+});
+
+process.on("unhandledRejection", (reason) => {
+  log(`unhandledRejection: ${errText(reason)}`);
+});
 
 /* ------------------------------- 小工具 ------------------------------- */
 
@@ -128,8 +186,8 @@ function flushStoreNow() {
     const tmp = STORE_FILE() + ".tmp"; // 原子替换：写一半断电不伤旧文件
     fs.writeFileSync(tmp, json);
     fs.renameSync(tmp, STORE_FILE());
-  } catch {
-    /* 落盘失败不影响界面（localStorage 仍为镜像） */
+  } catch (e) {
+    log(`记录真源落盘失败：${errText(e)}`);
   }
 }
 
@@ -199,27 +257,43 @@ ipcMain.handle("ww:select-save-dir", async () => {
  * 登录模块（desktop/zf-login.js）：扫码登录 / 令牌存取 / 原图直存。
  * 令牌持久化在 userData/ww-settings.json（zfToken 字段），跨版本升级永不丢；
  * 原图直存串行队列，下载字节直接写入壁纸保存目录。
+ *
+ * v1.4.10：require 包 try/catch —— 登录模块万一加载失败，只降级登录/原图
+ * 功能（界面明确提示），绝不拖死整个应用（无窗口静默退出）。
  */
-const login = createLoginModule({
-  readSettings,
-  writeSettings,
-  getSaveDir,
-  uniqueSavePath,
-});
+let login = null;
+try {
+  const { createLoginModule } = require("./zf-login.js");
+  login = createLoginModule({
+    readSettings,
+    writeSettings,
+    getSaveDir,
+    uniqueSavePath,
+  });
+} catch (e) {
+  login = null;
+  log(`登录模块加载失败（浏览/屏蔽/下载不受影响，仅扫码登录与原图直存不可用）：${errText(e)}`);
+}
 
-ipcMain.handle("ww:login-start", () => login.loginStart());
+/** 登录 IPC 兜底包装：模块缺失时返回统一的降级结果 */
+const loginCall = (method, fallback) => (_e, ...args) =>
+  login ? login[method](...args) : Promise.resolve(fallback);
 
-ipcMain.handle("ww:login-poll", (_e, state) => login.loginPoll(state));
+const LOGIN_DOWN = { error: "登录模块未能加载，请通过菜单「帮助 → 打开运行日志」查看原因" };
 
-ipcMain.handle("ww:login-get-token", () => login.getToken());
+ipcMain.handle("ww:login-start", loginCall("loginStart", LOGIN_DOWN));
 
-ipcMain.handle("ww:login-save-token", (_e, token, source) => login.saveToken(token, source));
+ipcMain.handle("ww:login-poll", loginCall("loginPoll", { status: "error", msg: LOGIN_DOWN.error }));
 
-ipcMain.handle("ww:login-clear-token", () => login.clearToken());
+ipcMain.handle("ww:login-get-token", loginCall("getToken", null));
 
-ipcMain.handle("ww:login-verify", (_e, wtId) => login.verifyToken(wtId));
+ipcMain.handle("ww:login-save-token", loginCall("saveToken", false));
 
-ipcMain.handle("ww:download-original", (_e, wtId, filename) => login.downloadOriginal(wtId, filename));
+ipcMain.handle("ww:login-clear-token", loginCall("clearToken", false));
+
+ipcMain.handle("ww:login-verify", loginCall("verifyToken", { valid: null, msg: LOGIN_DOWN.error }));
+
+ipcMain.handle("ww:download-original", loginCall("downloadOriginal", { ok: false, quality: "preview", reason: "error", msg: LOGIN_DOWN.error }));
 
 // 退出前强制把待写的记录真源落盘（防抖漏写兜底）
 app.on("before-quit", flushStoreNow);
@@ -358,6 +432,7 @@ function buildMenu(win) {
         `版本：v${APP_VERSION}（Electron ${process.versions.electron} / Chromium ${process.versions.chrome}）`,
         "保存位置可自定义（菜单「文件 → 选择保存位置…」），默认「图片 / WallpaperWorkshop」",
         "屏蔽 / 下载记录存应用本地数据文件，升级新版本不丢",
+        "遇到问题：菜单「帮助 → 打开运行日志」可一键定位原因",
         "数据实时来自 haowallpaper.com（哲风壁纸），版权归原作者所有",
       ].join("\n"),
       buttons: ["确定", "打开 GitHub"],
@@ -396,6 +471,17 @@ function buildMenu(win) {
       label: "帮助(H)",
       submenu: [
         { label: "关于壁纸工坊", click: about },
+        {
+          label: "打开运行日志",
+          click: () => {
+            try {
+              fs.mkdirSync(LOG_DIR(), { recursive: true });
+            } catch {
+              /* 已存在或无权限 */
+            }
+            shell.openPath(LOG_DIR());
+          },
+        },
         { label: "数据来源：哲风壁纸官网", click: () => shell.openExternal("https://haowallpaper.com") },
         {
           label: "GitHub Releases（历史版本）",
@@ -431,8 +517,35 @@ function createWindow() {
     },
   });
 
-  win.once("ready-to-show", () => win.show());
+  win.once("ready-to-show", () => {
+    log("窗口 ready-to-show（界面已呈现）");
+    win.show();
+  });
   win.on("close", () => persistWindowState(win));
+  win.on("closed", () => log("窗口已关闭"));
+
+  // 渲染层文档加载完成（说明 app:// 协议与静态资源链路 OK）
+  win.webContents.on("did-finish-load", () => log(`渲染层加载完成：${win.webContents.getURL()}`));
+
+  // 渲染进程崩溃（GPU/内存等）：弹窗可一键重载，而不是白屏无响应
+  win.webContents.on("render-process-gone", (_e, details) => {
+    log(`渲染进程异常退出：${JSON.stringify(details)}`);
+    dialog
+      .showMessageBox(win, {
+        type: "error",
+        title: "界面异常",
+        message: "壁纸工坊的界面进程意外退出了",
+        detail: `原因：${details.reason}${details.exitCode !== undefined ? `（代码 ${details.exitCode}）` : ""}\n可选择重新加载继续使用。`,
+        buttons: ["重新加载", "退出"],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response === 0) win.webContents.reload();
+        else win.close();
+      })
+      .catch(() => {});
+  });
 
   // 外链（target=_blank / window.open）→ 系统默认浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -551,10 +664,14 @@ function installSmoke(win) {
 
 /* ------------------------------- 生命周期 ------------------------------- */
 
+log(`壁纸工坊 v${APP_VERSION} 主进程启动（Electron ${process.versions.electron}，平台 ${process.platform} ${process.arch}）`);
+
 if (!app.requestSingleInstanceLock()) {
+  log("未获得单实例锁：已有实例在运行，本次启动退出（若没看到窗口，请检查任务栏/后台是否残留壁纸工坊进程后重试）");
   app.quit();
 } else {
   app.on("second-instance", () => {
+    log("second-instance：聚焦已有窗口");
     const [win] = BrowserWindow.getAllWindows();
     if (win) {
       if (win.isMinimized()) win.restore();
@@ -563,8 +680,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    log("app ready：注册 app:// 协议与下载接管");
     installAppProtocol();
     installDownloadHandler();
+    log("创建主窗口（app://local/index.html）");
     createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -572,6 +691,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("window-all-closed", () => {
+    log("所有窗口已关闭，退出应用");
     if (process.platform !== "darwin") app.quit();
   });
 }
