@@ -106,6 +106,8 @@ export function WorkshopTab() {
   const [saveDir, setSaveDir] = useState<string | null>(null)
   /** 扫码登录弹窗（v1.4.9：桌面版主进程托管 / 服务器版 API） */
   const [tokenOpen, setTokenOpen] = useState(false)
+  /** 因未登录被拦下的待补下载壁纸（登录成功后自动重试，v1.4.12） */
+  const pendingDownloadRef = useRef<ZhefengWallpaper | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -420,12 +422,47 @@ export function WorkshopTab() {
   }
 
   /**
-   * 触发一个下载（v1.4.9 三级链路）：
-   * 1. 桌面版（静态导出 + Electron 桥）：优先主进程原图直存
-   *    （令牌 + ALTCHA 人机验证 + getCompleteUrl 换官网原图直接写入保存目录）；
-   *    无令牌 / 令牌失效自动回退 CDN 预览直链（约 1100px）
-   * 2. 静态版（GitHub Pages 无桥）：CDN 预览直链取 blob 另存
-   * 3. 服务器版：/api 代理（隐藏 iframe 导航，服务端同样有令牌原图逻辑）
+   * 下载前置检查（v1.4.12）：桌面版先本地读令牌，未登录直接引导扫码，
+   * 不乐观移除卡片、不触发下载（官网原图仅对登录用户开放）。
+   * 返回 true = 已登录 / 无需检查（非桌面模式），可继续下载。
+   */
+  const ensureLoginOrGuide = useCallback(
+    (w: ZhefengWallpaper | null): Promise<boolean> => {
+      if (!IS_STATIC_EXPORT || !desktopBridge) return Promise.resolve(true)
+      return (async () => {
+        try {
+          const t = await desktopBridge.loginGetToken()
+          if (t?.token) return true
+        } catch {
+          /* 本地读失败（罕见）：放行走主进程链路兜底，避免误拦 */
+          return true
+        }
+        if (w) pendingDownloadRef.current = w
+        toast.warning("下载高清原图需先扫码登录", {
+          description:
+            "实测官网原图仅对登录用户开放（未登录直链只回 890px 预览小图）。微信扫码登录一次，即可下载与官网完全一致的 4K/7K 原画。",
+          duration: 15000,
+          action: { label: "立即扫码", onClick: () => setTokenOpen(true) },
+        })
+        return false
+      })()
+    },
+    []
+  )
+
+  /**
+   * 触发一个下载（v1.4.12 质量硬保证）。
+   *
+   * 背景（实测官网 CDN 行为）：未登录状态即使访问原图 .png 直链，
+   * CDN 也只回 890×556 / 约 25KB 的 webp 预览小图；4K/7K 原图仅对
+   * 登录用户通过「ALTCHA 人机验证 + getCompleteUrl 签名直链」开放。
+   *
+   * 因此不再「静默回退保存小图」（用户拿到模糊图还以为坏了）：
+   * 1. 桌面版（Electron 桥）：主进程原图直存（令牌 + ALTCHA +
+   *    getCompleteUrl）。无令牌 / 令牌失效 → 弹「扫码登录」引导
+   *    （toast 一键打开登录弹窗，登录成功自动补下这一张）。
+   * 2. 静态 Pages 版（无桥）：只能拿 CDN 预览，保存时明确标注质量。
+   * 3. 服务器版：/api 代理 fetch + blob（读 X-Wallpaper-Quality 头提示）。
    */
   const triggerDownload = (w: ZhefengWallpaper) => {
     if (IS_STATIC_EXPORT) {
@@ -441,27 +478,46 @@ export function WorkshopTab() {
               )
               if (r.ok) {
                 recordLocalDownload({ id: w.id, title: w.title, src: w.src })
-                if (r.quality === "preview") {
-                  toast.info("已保存（预览质量约 1100px）", {
-                    description: "点页头「扫码登录」获取令牌，即可下载与官网完全一致的原图",
-                    duration: 7000,
-                  })
-                }
+                toast.success("已保存高清原图（与官网一致）", {
+                  description: r.savedPath,
+                  duration: 6000,
+                })
                 return
               }
-              if (r.reason === "auth-expired") {
-                toast.warning("令牌已失效，本次下载为预览质量", {
-                  description: "点页头「扫码登录」重新获取令牌，即刻恢复高清原图",
-                  duration: 8000,
-                })
+              // 无令牌 / 令牌失效：引导重新扫码，不保存 890px 小图冒充原图
+              if (r.reason === "no-token" || r.reason === "auth-expired") {
+                pendingDownloadRef.current = w
+                toast.warning(
+                  r.reason === "auth-expired" ? "登录令牌已失效，请重新扫码" : "下载高清原图需先扫码登录",
+                  {
+                    description:
+                      "官网原图仅对登录用户开放（未登录直链只回 890px 预览小图）。扫码登录后自动继续下载这一张。",
+                    duration: 15000,
+                    action: { label: r.reason === "auth-expired" ? "重新扫码" : "立即扫码", onClick: () => setTokenOpen(true) },
+                  }
+                )
+                return
               }
-              // no-token / error：静默回退 CDN 预览直链
+              // 官网接口 / 网络异常：提示重试，不静默降级（避免误收模糊图）
+              toast.error("原图下载失败，请稍后重试", {
+                description: r.msg,
+                duration: 8000,
+              })
+              return
             } catch {
-              /* 主进程异常：回退 CDN 预览直链 */
+              /* 主进程异常：同样不静默降级 */
+              toast.error("原图下载失败，请稍后重试")
+              return
             }
           }
+          // Pages 在线版：无主进程无令牌链路，只能拿 CDN 预览（实测 890px）
           const { blob, filename } = await prepareWallpaperBlob(w)
           saveBlobViaAnchor(filename, blob)
+          toast.info("已保存预览质量（约 890px）", {
+            description:
+              "在线版受官网限制仅能获取预览图；安装桌面版并扫码登录，可下载与官网完全一致的 4K/7K 原图。",
+            duration: 9000,
+          })
         } catch (e) {
           toast.error("下载失败，请稍后重试", {
             description: e instanceof Error ? e.message : undefined,
@@ -470,13 +526,50 @@ export function WorkshopTab() {
       })()
       return
     }
-    const frame = document.createElement("iframe")
-    frame.style.display = "none"
-    frame.src = `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
-      w.title
-    )}&id=${encodeURIComponent(w.id)}&wtId=${encodeURIComponent(w.wtId || w.id)}`
-    document.body.appendChild(frame)
-    setTimeout(() => frame.remove(), 600_000)
+    // 服务器版：fetch + blob 下载（能读质量 / 令牌失效响应头，给出对应提示）
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
+            w.title
+          )}&id=${encodeURIComponent(w.id)}&wtId=${encodeURIComponent(w.wtId || w.id)}`
+        )
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as { error?: string } | null
+          toast.error("原图下载失败，请稍后重试", { description: data?.error })
+          return
+        }
+        const blob = await res.blob()
+        const quality = res.headers.get("X-Wallpaper-Quality")
+        const authExpired = res.headers.get("X-Auth-Expired") === "1"
+        // 文件名优先取服务端清洗过的（Content-Disposition），失败本地拼
+        const cd = res.headers.get("Content-Disposition") ?? ""
+        const m = /filename\*=UTF-8''([^;]+)/.exec(cd)
+        const dot = w.src.lastIndexOf(".")
+        const ext = dot === -1 ? "png" : w.src.slice(dot + 1).toLowerCase()
+        const filename = m ? decodeURIComponent(m[1]) : `${safeClientName(w.title)}.${ext}`
+        saveBlobViaAnchor(filename, blob)
+        if (authExpired) {
+          toast.warning("令牌已失效，本次为预览质量（890px）", {
+            description: "重新扫码登录后即可恢复与官网一致的高清原图。",
+            duration: 10000,
+            action: { label: "重新扫码", onClick: () => setTokenOpen(true) },
+          })
+        } else if (quality === "original") {
+          toast.success("已保存高清原图（与官网一致）")
+        } else {
+          toast.info("已保存预览质量（约 890px）", {
+            description: "扫码登录后可下载与官网完全一致的高清原图。",
+            duration: 8000,
+            action: { label: "扫码领原图", onClick: () => setTokenOpen(true) },
+          })
+        }
+      } catch (e) {
+        toast.error("下载失败，请稍后重试", {
+          description: e instanceof Error ? e.message : undefined,
+        })
+      }
+    })()
   }
 
   /** 打开下载说明 / 选择保存位置（桌面版：弹目录选择框，选择即生效并记忆） */
@@ -530,25 +623,43 @@ export function WorkshopTab() {
     desktopBridge.onOpenLogin(() => setTokenOpen(true))
   }, [])
 
-  /** 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再排队回源），
-   *  18 张全部铺开也不会挤占缩略图代理的带宽 */
+  /**
+   * 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再排队回源），
+   * 18 张全部铺开也不会挤占缩略图代理的带宽。
+   * v1.4.12：桌面版先预检令牌，未登录一次引导（不逐张弹 toast）。
+   */
   const batchDownload = () => {
     if (selected.length === 0) return
-    selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 700))
-    toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
-      duration: 6000,
-    })
-    // 乐观移除：下载记录落库后由后台刷新同步真实状态
-    const ids = new Set(selected.map((w) => w.id))
-    setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
-    setDownloadedCount((n) => n + selected.length)
-    setSelected([])
-    // 后台静默刷新两趟（不清屏、失败也不影响当前显示）：
-    // 8s 同步已落库的下载记录，32s 兑现仍在排队中的尾部下载
-    if (hideDownloaded) {
-      autoRefreshLater(8_000)
-      autoRefreshLater(32_000)
-    }
+    void (async () => {
+      if (!(await ensureLoginOrGuide(null))) return
+      selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 700))
+      toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
+        duration: 6000,
+      })
+      // 乐观移除：下载记录落库后由后台刷新同步真实状态
+      const ids = new Set(selected.map((w) => w.id))
+      setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
+      setDownloadedCount((n) => n + selected.length)
+      setSelected([])
+      // 后台静默刷新两趟（不清屏、失败也不影响当前显示）：
+      // 8s 同步已落库的下载记录，32s 兑现仍在排队中的尾部下载
+      if (hideDownloaded) {
+        autoRefreshLater(8_000)
+        autoRefreshLater(32_000)
+      }
+    })()
+  }
+
+  /**
+   * 单张下载入口（v1.4.12）：先确保已登录（桌面版），未登录引导扫码且
+   * 不做乐观移除（卡片留在原地）；已登录才触发下载 + 乐观移除。
+   */
+  const downloadOne = (w: ZhefengWallpaper) => {
+    void (async () => {
+      if (!(await ensureLoginOrGuide(w))) return
+      triggerDownload(w)
+      onDownloadOne(w)
+    })()
   }
 
   /** 单张下载：乐观移除（hideDownloaded 开启时） */
@@ -612,7 +723,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.11 桌面版
+            v1.4.12 桌面版
           </span>
           {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
               纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
@@ -907,8 +1018,7 @@ export function WorkshopTab() {
                           aria-label={`下载原图 ${w.title}`}
                           onClick={(e) => {
                             e.stopPropagation()
-                            triggerDownload(w)
-                            onDownloadOne(w)
+                            downloadOne(w)
                           }}
                           className="flex size-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-transform hover:scale-110"
                         >
@@ -1016,6 +1126,17 @@ export function WorkshopTab() {
           open={tokenOpen}
           onOpenChange={setTokenOpen}
           probeWtId={list.items[0]?.wtId ?? list.items[0]?.id ?? null}
+          onLoggedIn={() => {
+            // 登录成功 → 自动补下刚才因未登录被拦下的那一张（v1.4.12）
+            const w = pendingDownloadRef.current
+            if (!w) return
+            pendingDownloadRef.current = null
+            toast.success("登录成功，正在继续下载刚才的高清原图")
+            setTimeout(() => {
+              triggerDownload(w)
+              onDownloadOne(w)
+            }, 800)
+          }}
         />
       )}
 
@@ -1030,8 +1151,7 @@ export function WorkshopTab() {
           toast.success(selected.some((p) => p.id === w.id) ? "已取消选择" : "已加入选择")
         }}
         onDownloaded={(w) => {
-          triggerDownload(w)
-          onDownloadOne(w)
+          downloadOne(w)
           setPreview(null)
         }}
         onBlocked={(w) => {
