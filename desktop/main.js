@@ -649,6 +649,41 @@ function installSmoke(win) {
           report.loginError = String(e && e.message ? e.message : e);
         }
       }
+      // 下载行为验证（WW_SMOKE_DOWNLOAD=1，v1.4.12）：未登录点击「下载原图」
+      // → 应弹「扫码登录」引导 toast，且不静默保存 890px 小图
+      if (process.env.WW_SMOKE_DOWNLOAD === "1") {
+        try {
+          // 先关掉可能开着的登录弹窗（ESC）
+          await win.webContents.executeJavaScript(
+            `(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true; })()`,
+            true
+          );
+          await new Promise((r) => setTimeout(r, 600));
+          await win.webContents.executeJavaScript(
+            `(() => { [...document.querySelectorAll("[aria-label*='下载原图']")][0]?.click(); true; })()`,
+            true
+          );
+          await new Promise((r) => setTimeout(r, 2500));
+          const s = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                const toasts = Array.from(document.querySelectorAll('[data-sonner-toast]'));
+                const saved = Array.from(document.querySelectorAll('a[download]'));
+                return {
+                  toastText: toasts.map(t => (t.innerText || '').replace(/\\s+/g, ' ')).join(' || ').slice(0, 200),
+                  guideShown: toasts.some(t => (t.innerText || '').includes('扫码登录') || (t.innerText || '').includes('重新扫码')),
+                  actionBtn: toasts.some(t => [...t.querySelectorAll('button')].some(b => b.textContent.includes('扫码'))),
+                  anchorSaved: saved.length,
+                };
+              })()`,
+              true
+            )
+            .catch(() => null);
+          if (s) report.download = s;
+        } catch (e) {
+          report.downloadError = String(e && e.message ? e.message : e);
+        }
+      }
       const img = await win.webContents.capturePage();
       fs.writeFileSync(out, img.toPNG());
       report.screenshot = out;

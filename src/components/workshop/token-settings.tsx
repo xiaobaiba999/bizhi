@@ -76,11 +76,14 @@ export function TokenSettingsDialog({
   open,
   onOpenChange,
   probeWtId,
+  onLoggedIn,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   /** 用于验证令牌有效性的壁纸 id（当前列表任一张，官网接口需要） */
   probeWtId?: string | null
+  /** 登录 / 保存令牌成功回调（v1.4.12：用于自动补下被拦下的下载） */
+  onLoggedIn?: () => void
 }) {
   const [state, setState] = useState<TokenState>({ token: null, source: null, createdAt: null })
   const [mode, setMode] = useState<"qrcode" | "manual">("qrcode")
@@ -312,6 +315,7 @@ export function TokenSettingsDialog({
               setPhase("ok")
               toast.success("扫码登录成功，令牌已自动保存")
               void refresh()
+              onLoggedIn?.()
             } else if (data.status === "scanned") {
               // 已扫码（或已确认授权，正在换取令牌）
               pollFailRef.current = 0
@@ -353,7 +357,7 @@ export function TokenSettingsDialog({
       stopped = true
       clearInterval(timer)
     }
-  }, [open, mode, phase, qr, refresh])
+  }, [open, mode, phase, qr, refresh, onLoggedIn])
 
   const regenQr = () => {
     setQrNonce((n) => n + 1)
@@ -367,6 +371,7 @@ export function TokenSettingsDialog({
         if (!ok) throw new Error("保存失败")
         toast.success("令牌已保存，下载原图功能已就绪")
         await refresh()
+        onLoggedIn?.()
         return
       }
       const res = await fetch("/api/token", {
@@ -378,6 +383,7 @@ export function TokenSettingsDialog({
       if (!res.ok) throw new Error(msg?.error ?? "保存失败")
       setState(msg)
       toast.success("令牌已保存，下载原图功能已就绪")
+      onLoggedIn?.()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存令牌失败")
     } finally {
@@ -456,7 +462,7 @@ export function TokenSettingsDialog({
               </div>
               <p className="mt-1.5 pl-7 text-[11px] leading-relaxed text-muted-foreground">
                 {verify === "invalid"
-                  ? "下载原图已退回预览质量（约 1100px）。请重新扫码登录获取新令牌，即刻恢复高清原图。"
+                  ? "令牌已失效，下载会引导重新扫码（官网原图仅对登录用户开放）。重新扫码后即刻恢复高清原图。"
                   : "下载原图时自动使用令牌获取与官网完全一致的原图"}
               </p>
               {verify === "invalid" && verifyMsg && (
@@ -498,7 +504,7 @@ export function TokenSettingsDialog({
             <div className="mb-4 rounded-xl border border-dashed px-3.5 py-2.5">
               <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                 <KeyRound className="size-3.5 shrink-0" />
-                <span className="truncate">暂无令牌 —— 当前下载为预览质量（约 1100px）</span>
+                <span className="truncate">暂无令牌 —— 下载高清原图需先扫码登录</span>
               </div>
             </div>
           )}
