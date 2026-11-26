@@ -243,13 +243,21 @@ export interface ScanResult {
 /**
  * 从 startPage 起按 4 页一组「并行」向前扫描源站，直到：
  * - 收满 limit 张未过滤壁纸；或
- * - 源站到底（空页 / 短页）；或
+ * - 源站到底（重试后仍为空的页面）；或
  * - 达到单轮扫描页数上限 maxPages（防极端情况无限扫描）。
  *
  * 这是「下载了一两百张后整页被过滤、刷新也没用」的根治方案：
  * 旧逻辑每轮只看 4 页（48 张），一旦连续过滤超过 48 张就返回空列表，
  * 客户端 hasMore 又被误杀成 false，滚动彻底卡死。
  * 现在返回 nextCursor 游标，客户端拿着游标继续扫，永远能扫到未下载的内容。
+ *
+ * 【v1.4.11 两个关键修复 —— 根治「只加载一小部分」】
+ * 1. 不再因「短页」（<12 张）提前终止：源站限流时常返回残缺页，
+ *    旧逻辑误判为最后一页导致网格只剩几张就停（用户实测 8 张/7 张）。
+ *    真正的到底信号 = 页面完全为空且 fresh 重试后仍为空。
+ * 2. 游标不再「整批跳页」：旧逻辑一批 4 页扫完游标直接 +4，批次内
+ *    未被收进列表的壁纸（已收满 limit 时被丢弃的）从此永远跳过。
+ *    现在游标停在最后贡献壁纸的页，下一轮重扫该页时客户端按 id 去重，零漏图。
  *
  * @param keep 过滤谓词：返回 true 的壁纸才会被收集
  * @param opts.fresh true = 绕过页缓存直接回源（手动刷新时用）
@@ -268,6 +276,8 @@ export async function scanSourcePages(
   let scannedPages = 0
   let sourceHasMore = true
   let page = Math.max(1, startPage)
+  /** 最后真正贡献了壁纸的源站页码（0 = 本轮一张都没收到） */
+  let lastContribPage = 0
 
   while (items.length < limit && scannedPages < maxPages && sourceHasMore) {
     // 4 页一组并行抓取：单页 ~300ms，并行后扫描 40 页也只要几秒
@@ -277,16 +287,25 @@ export async function scanSourcePages(
     )
 
     let gotAny = false
-    let shortPage = false
-    for (const r of batch) {
+    for (let i = 0; i < batch.length; i++) {
+      let r: PromiseSettledResult<ZhefengWallpaper[]> = batch[i]
+      // 空页可能只是源站限流（返回残缺 HTML）：fresh 重试一次再判「到底」
+      if (r.status === "fulfilled" && r.value.length === 0) {
+        try {
+          const retried = await fetchWallpapers(cat, page + i, { fresh: true })
+          if (retried.length > 0) r = { status: "fulfilled", value: retried }
+        } catch {
+          /* 重试失败：按空页处理 */
+        }
+      }
       if (r.status !== "fulfilled") continue // 单页失败：组内其余页照常处理
       gotAny = true
       scannedPages += 1
       if (r.value.length === 0) {
-        sourceHasMore = false // 空页 = 源站到底
+        sourceHasMore = false // 重试后仍为空 = 源站真的到底
         break
       }
-      if (r.value.length < PAGE_SIZE) shortPage = true
+      let pushedFromThisPage = false
       for (const w of r.value) {
         if (seen.has(w.id)) continue
         seen.add(w.id)
@@ -294,22 +313,27 @@ export async function scanSourcePages(
           skipped += 1
           continue
         }
-        if (items.length < limit) items.push(w)
+        if (items.length < limit) {
+          items.push(w)
+          pushedFromThisPage = true
+        }
       }
+      if (pushedFromThisPage) lastContribPage = page + i
       if (items.length >= limit) break
     }
     if (!gotAny) {
       // 整组失败（网络问题）：抛出让上层重试，而不是误判「到底」
       throw new Error("源站暂时无法访问，请稍后重试")
     }
-    if (shortPage && items.length < limit) sourceHasMore = false
     if (!sourceHasMore) break
     page += batchSize
   }
 
   return {
     items,
-    nextCursor: sourceHasMore ? page : 0,
+    // 有贡献页 → 从该页续扫（客户端按 id 去重，不重不漏）；
+    // 全被过滤 → 跳过已扫页继续向前找
+    nextCursor: !sourceHasMore ? 0 : lastContribPage > 0 ? lastContribPage : page,
     sourceHasMore,
     skipped,
     scannedPages,

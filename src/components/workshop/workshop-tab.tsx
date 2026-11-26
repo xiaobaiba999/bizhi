@@ -26,6 +26,7 @@ import {
   IS_STATIC_EXPORT,
   IS_DESKTOP,
   loadWallpaperPage,
+  fetchSiteFirstPage,
   clearAllDownloads,
   blockWallpaper,
   clearAllBlocked,
@@ -54,6 +55,16 @@ interface ListState {
 }
 
 const INITIAL: ListState = { items: [], hasMore: true, loading: false, error: null }
+
+/** 首屏填充目标（v1.4.11）：一次加载至少铺满两屏，官网级满屏体验 */
+const FIRST_FILL_TARGET = 48
+/** 滚动每批目标：比旧版（12）翻倍，快速滚动不等待 */
+const SCROLL_BATCH_TARGET = 24
+/** 单次交互最多扫描轮数（每轮内部最多 40 页源站，有界防失控） */
+const MAX_ROUNDS = 10
+/** 官网增量同步间隔（窗口聚焦时也会触发，问隅 45 秒内不重复） */
+const SITE_SYNC_INTERVAL_MS = 5 * 60_000
+const SITE_SYNC_COOLDOWN_MS = 45_000
 
 /**
  * 壁纸工坊主界面（v1.4.6 优化版）
@@ -110,12 +121,25 @@ export function WorkshopTab() {
   const hasMoreRef = useRef(true)
   /** 已成功追加的轮数（>0 说明用户已向下翻页，后台自动刷新别把人拽回顶部） */
   const loadsRef = useRef(0)
+  /** 当前列表项镜像（同步读取用：官网同步 diff / 批次计数） */
+  const listItemsRef = useRef<ZhefengWallpaper[]>([])
+
+  useEffect(() => {
+    listItemsRef.current = list.items
+  }, [list.items])
 
   const cat = ZHEFENG_CATEGORIES.find((c) => c.key === catKey) ?? ZHEFENG_CATEGORIES[0]
   const isPhone = cat.wpType === 2
 
   /**
-   * 加载下一批壁纸（游标驱动 + 空轮自动续扫）。
+   * 加载下一批壁纸（v1.4.11：目标量驱动 + 每轮渐进上屏）。
+   *
+   * 旧版一次只收 12 张就停 —— 满屏该显示 40+ 张却只有一页的量，
+   * 下载/屏蔽记录一多更是只剩几张。现在：
+   * - 首次加载：循环收满 48 张（每收 12 张立即上屏，首屏秒出、后续渐进填满）
+   * - 滚动加载：每批 24 张，快速滚动不等待
+   * - 每轮返回的 nextCursor 停在「最后贡献页」，不重不漏（配合 id 去重）
+   *
    * @param replace true = 重置游标从头扫（切分类 / 重试）；false = 从游标继续（无限滚动）
    */
   const loadNext = useCallback(
@@ -138,11 +162,19 @@ export function WorkshopTab() {
       )
 
       try {
+        const target = replace ? FIRST_FILL_TARGET : SCROLL_BATCH_TARGET
+        let got = 0
         let rounds = 0
-        // 空轮自动续扫：本轮全被过滤但源站还有 → 拿 nextCursor 继续扫
-        // （最多 5 轮 = 单次交互最多扫 200 页源站，防极端情况失控）
-        while (true) {
-          const data = await loadWallpaperPage(catKey, cursorRef.current, hideDownloaded)
+        // 已有 id 累加器：每轮传给扫描端当作「已过滤」，重扫贡献页只收新面孔，
+        // 每轮必然向前推进（不依赖渲染时机，比读 state 镜像更可靠）
+        const knownAcc = new Set<string>(
+          replace ? [] : listItemsRef.current.map((i) => i.id)
+        )
+        // 每轮收 12 张立即上屏，循环到目标量 —— 重过滤也能满屏
+        while (got < target) {
+          const data = await loadWallpaperPage(catKey, cursorRef.current, hideDownloaded, {
+            knownIds: knownAcc.size > 0 ? Array.from(knownAcc) : undefined,
+          })
           if (seq !== seqRef.current) return // 过期响应，丢弃
 
           cursorRef.current = data.nextCursor
@@ -160,8 +192,10 @@ export function WorkshopTab() {
           setBlockedCount(data.blockedCount)
           if (!replace && rounds === 0 && data.items.length > 0) loadsRef.current += 1
 
-          if (data.items.length > 0 || !data.hasMore || data.nextCursor === 0 || rounds >= 4)
-            break
+          for (const w of data.items) knownAcc.add(w.id)
+          got += data.items.length
+
+          if (!data.hasMore || data.nextCursor === 0 || rounds >= MAX_ROUNDS) break
           rounds++
         }
       } catch (e) {
@@ -192,10 +226,10 @@ export function WorkshopTab() {
   }, [catKey, reloadNonce, hideDownloaded])
 
   /**
-   * 手动刷新（v1.4.6 强化）：强制回源从第 1 页深度扫描 ——
+   * 手动刷新（v1.4.11 强化）：强制回源从第 1 页深度扫描，收满 48 张为止 ——
    * - fresh 绕过页缓存，拿到源站刚刚更新的内容
    * - 跳过所有已下载 / 已屏蔽，把最新壁纸捞出来替换当前网格
-   * - 单轮 40 页全被过滤时自动续扫（最多 5 轮 = 200 页），刷新必出图
+   * - 旧版收到 12 张就停（列表越刷越短），现在与首屏同样的满屏目标
    * 抓取期间旧壁纸继续显示（不清屏），失败也保持原样（仅提示）。
    */
   const refreshList = useCallback(
@@ -212,11 +246,13 @@ export function WorkshopTab() {
         let collected: ZhefengWallpaper[] = []
         let data: Awaited<ReturnType<typeof loadWallpaperPage>> | null = null
         let rounds = 0
-        // 空轮自动续扫：本轮全被过滤但源站还有 → 拿 nextCursor 继续扫
-        // （最多 5 轮 = 200 页源站，与滚动加载同限）
-        while (true) {
+        // 已收集 id 累加器：后续轮次传给扫描端当作「已过滤」，不重收
+        const knownAcc = new Set<string>()
+        // 收满 48 张或源站到底为止（每轮结束即上屏，扫描过程可感知）
+        while (collected.length < FIRST_FILL_TARGET) {
           data = await loadWallpaperPage(catKey, cursorRef.current, hideDownloaded, {
             fresh: true,
+            knownIds: knownAcc.size > 0 ? Array.from(knownAcc) : undefined,
           })
           if (seq !== seqRef.current) return // 过期响应，丢弃
 
@@ -226,6 +262,7 @@ export function WorkshopTab() {
 
           const known = new Set(collected.map((i) => i.id))
           collected = [...collected, ...data.items.filter((i) => !known.has(i.id))]
+          for (const w of data.items) knownAcc.add(w.id)
 
           // 每轮结束即上屏（用户能感知到扫描在进行）
           setList({
@@ -237,8 +274,7 @@ export function WorkshopTab() {
           setDownloadedCount(data.downloadedCount)
           setBlockedCount(data.blockedCount)
 
-          if (collected.length > 0 || !data.hasMore || data.nextCursor === 0 || rounds >= 4)
-            break
+          if (!data.hasMore || data.nextCursor === 0 || rounds >= MAX_ROUNDS) break
           rounds++
         }
         loadsRef.current = 0
@@ -294,9 +330,70 @@ export function WorkshopTab() {
     }, delay)
   }, [])
 
+  /* ---------------- 官网增量同步（v1.4.11） ---------------- */
+
+  /** 上次同步时间（聚焦 / 定时共用冷却，失败不占冷却） */
+  const lastSyncAtRef = useRef(0)
+
+  /**
+   * 与官网同步（静默增量）：拉源站第 1 页最新，新面孔直接插入列表顶部 ——
+   * - 不打断浏览：深滚（>800px）或正在扫描/刷新时不同步；
+   * - 不清屏不重置：旧内容原位保留，新壁纸推入顶部 + 轻提示；
+   * - 开销极小：单页请求（fresh），不动游标不动已加载的批次。
+   */
+  const syncWithSite = useCallback(async () => {
+    const now = Date.now()
+    if (now - lastSyncAtRef.current < SITE_SYNC_COOLDOWN_MS) return
+    if (scanActiveRef.current || refreshingRef.current || document.hidden) return
+    if (listItemsRef.current.length === 0) return // 空列表交给正常加载链路
+    // 深滚时别打扰：顶部插入会把正在看的内容推下去
+    const el = scrollRef.current
+    if (el && el.scrollTop > 800) return
+
+    const seq = seqRef.current
+    lastSyncAtRef.current = now
+    try {
+      const fresh = await fetchSiteFirstPage(catKey, hideDownloaded)
+      if (seq !== seqRef.current) return // 期间切了分类/刷新，丢弃
+      const known = new Set(listItemsRef.current.map((i) => i.id))
+      const add = fresh.filter((w) => !known.has(w.id))
+      if (add.length === 0) return
+      setList((s) => {
+        const k2 = new Set(s.items.map((i) => i.id))
+        const trulyNew = add.filter((w) => !k2.has(w.id))
+        if (trulyNew.length === 0) return s
+        return { ...s, items: [...trulyNew, ...s.items], hasMore: true }
+      })
+      toast.info(`已同步官网最新 ${add.length} 张壁纸`, {
+        id: "wf-site-sync",
+        description: "新壁纸已插入列表顶部（与官网同步）",
+        duration: 4000,
+      })
+    } catch {
+      lastSyncAtRef.current = 0 // 失败不占冷却，下次聚焦立即重试
+    }
+  }, [catKey, hideDownloaded])
+
+  /** 永远指向最新 syncWithSite 的 ref（定时器 / 聚焦回调用） */
+  const syncWithSiteRef = useRef(syncWithSite)
+  syncWithSiteRef.current = syncWithSite
+
+  // 官网同步触发器：窗口聚焦（切回应用/切回标签页）+ 每 5 分钟定时；
+  // 页面隐藏时跳过，冷却 45 秒防频繁切换窗口时请求风暴
+  useEffect(() => {
+    const onFocus = () => void syncWithSiteRef.current()
+    window.addEventListener("focus", onFocus)
+    const timer = setInterval(() => void syncWithSiteRef.current(), SITE_SYNC_INTERVAL_MS)
+    return () => {
+      window.removeEventListener("focus", onFocus)
+      clearInterval(timer)
+    }
+  }, [])
+
   // 无限滚动：哨兵进入可视区即加载下一批。
   // 关键修复：依赖 [list.loading, list.hasMore] —— 每轮扫描结束后重建观察器，
   // 哨兵仍在视口内时会立即再触发（旧版空页后 IO 不再回调，滚动假死）。
+  // v1.4.11：预取距离 400→800px，滚动更顺滑（下一批提前开始加载）。
   useEffect(() => {
     const el = sentinelRef.current
     const root = scrollRef.current
@@ -305,7 +402,7 @@ export function WorkshopTab() {
       (entries) => {
         if (entries.some((en) => en.isIntersecting)) void loadNextRef.current(false)
       },
-      { root, rootMargin: "400px 0px" }
+      { root, rootMargin: "800px 0px" }
     )
     io.observe(el)
     return () => io.disconnect()
@@ -515,7 +612,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.10 桌面版
+            v1.4.11 桌面版
           </span>
           {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
               纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
@@ -728,7 +825,7 @@ export function WorkshopTab() {
                   "grid gap-3",
                   isPhone
                     ? "grid-cols-2 @sm:grid-cols-3 @xl:grid-cols-4 @3xl:grid-cols-5 @5xl:grid-cols-6"
-                    : "grid-cols-1 @sm:grid-cols-2 @2xl:grid-cols-3 @4xl:grid-cols-4"
+                    : "grid-cols-2 @sm:grid-cols-3 @2xl:grid-cols-4 @4xl:grid-cols-5"
                 )}
               >
                 {list.items.map((w, idx) => {
@@ -738,7 +835,6 @@ export function WorkshopTab() {
                     <motion.button
                       key={w.id}
                       type="button"
-                      layout
                       initial={{ opacity: 0, y: 12 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ duration: 0.25 }}
@@ -756,7 +852,7 @@ export function WorkshopTab() {
                       <WallpaperImage
                         candidates={displayFallbackChain(w)}
                         alt={`壁纸 ${w.title}`}
-                        eager={idx < 6}
+                        eager={idx < 10}
                         reloadKey={imgRetryNonce}
                         className="size-full object-cover group-hover:scale-105"
                       />
