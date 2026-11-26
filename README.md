@@ -2,7 +2,7 @@
 
 本仓库是「壁纸工坊」的纯静态网页版，由部署脚本自动推送，站点地址：
 
-**https://xiaobaiba999.github.io/**
+**https://xiaobaiba999.github.io/bizhi**
 
 ## Windows 桌面版（v1.4.7 新增）
 
@@ -33,9 +33,9 @@
 ## 仓库结构
 
 - `main` 分支：即本静态站点（`index.html` / `_next/` 等），
-  由项目源码执行 `node scripts/build-gh-pages.mjs ` 构建产出，
+  由项目源码执行 `node scripts/build-gh-pages.mjs /bizhi` 构建产出，
   再通过 GitHub REST API 一键推送（见源码项目 `scripts/deploy-to-github.mjs`）
 - `source` 分支：完整项目源码快照（Next.js 16 + Prisma + Tailwind 4 +
   Electron 桌面版），由 `node scripts/push-source-to-github.mjs` 推送
 
-> 本站以 `/` 子路径托管构建，请勿改名或移动文件，否则资源路径会失效。
+> 本站以 `/bizhi` 子路径托管构建，请勿改名或移动文件，否则资源路径会失效。
