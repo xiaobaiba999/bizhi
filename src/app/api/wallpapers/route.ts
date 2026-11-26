@@ -26,11 +26,59 @@ export async function GET(req: NextRequest) {
   const hideDownloaded =
     req.nextUrl.searchParams.get("hideDownloaded") === "0" ? false : true
   const fresh = req.nextUrl.searchParams.get("fresh") === "1"
+  const sync = req.nextUrl.searchParams.get("sync") === "1"
+  // 客户端已有壁纸 id（v1.4.11）：扫描端把它们当作已过滤 ——
+  // 配合「游标停在最后贡献页」语义，重扫该页只收新面孔，不重不漏
+  const knownIds = new Set(
+    (req.nextUrl.searchParams.get("known") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => /^[\w.-]{1,80}$/.test(s))
+  )
 
   try {
     const cat = findCategory(catKey)
     const blockedCount = await db.blocked.count()
     const downloadedCount = await db.download.count()
+
+    // 官网同步（v1.4.11）：只拉源站第 1 页最新内容（fresh），
+    // 过滤后原样返回 —— 轻量增量同步，不做深度扫描
+    if (sync) {
+      const batch = await fetchWallpapers(cat, 1, { fresh: true })
+      const ids = batch.map((w) => w.id)
+      const blockedIds = new Set(
+        ids.length
+          ? (
+              await db.blocked.findMany({ where: { id: { in: ids } }, select: { id: true } })
+            ).map((b) => b.id)
+          : []
+      )
+      const downloadedIds = hideDownloaded
+        ? new Set(
+            ids.length
+              ? (
+                  await db.download.findMany({ where: { id: { in: ids } }, select: { id: true } })
+                ).map((d) => d.id)
+              : []
+          )
+        : new Set<string>()
+      const items = batch.filter(
+        (w) => !blockedIds.has(w.id) && !downloadedIds.has(w.id)
+      )
+      return NextResponse.json(
+        {
+          category: cat.name,
+          wpType: cat.wpType,
+          items,
+          hasMore: true,
+          nextCursor: 2,
+          skipped: batch.length - items.length,
+          downloadedCount,
+          blockedCount,
+        },
+        { headers: { "Cache-Control": "no-store" } }
+      )
+    }
 
     // 不隐藏已下载：只过滤屏蔽项，一页就是一页（无深度扫描必要）
     if (!hideDownloaded) {
@@ -73,7 +121,7 @@ export async function GET(req: NextRequest) {
       cat,
       startPage,
       PAGE_SIZE,
-      (w) => !downloadedIds.has(w.id) && !blockedIds.has(w.id),
+      (w) => !downloadedIds.has(w.id) && !blockedIds.has(w.id) && !knownIds.has(w.id),
       40,
       { fresh }
     )

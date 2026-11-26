@@ -62,23 +62,31 @@ export interface WallpaperPage {
  * @param cursor 从源站第几页开始扫（0 = 从第 1 页；上轮返回的 nextCursor）
  * @param hideDownloaded 是否过滤已下载
  * @param opts.fresh true = 绕过页缓存直接回源（手动刷新时用）
+ * @param opts.knownIds 客户端已有的壁纸 id（滚动/填充链路传入；扫描端把它们
+ *   当作「已过滤」不入列表 —— 配合「游标停在最后贡献页」语义，重扫该页时
+ *   只收新面孔，既不重复也不漏图，每轮必然向前推进）
  */
 export async function loadWallpaperPage(
   catKey: string,
   cursor: number,
   hideDownloaded: boolean,
-  opts?: { fresh?: boolean }
+  opts?: { fresh?: boolean; knownIds?: string[] }
 ): Promise<WallpaperPage> {
   const startPage = Math.max(1, cursor || 1)
   const fresh = opts?.fresh === true
+  const knownList = (opts?.knownIds ?? [])
+    .filter((id) => /^[\w.-]{1,80}$/.test(id))
+    .slice(-250) // 截最近 250 个：贡献页上的是刚收的新 id，保尾不保头
 
   if (!IS_STATIC_EXPORT) {
-    const res = await fetch(
-      `/api/wallpapers?cat=${encodeURIComponent(catKey)}&cursor=${startPage}&hideDownloaded=${
-        hideDownloaded ? 1 : 0
-      }${fresh ? "&fresh=1" : ""}`,
-      { cache: "no-store" }
-    )
+    const qs = new URLSearchParams({
+      cat: catKey,
+      cursor: String(startPage),
+      hideDownloaded: hideDownloaded ? "1" : "0",
+    })
+    if (fresh) qs.set("fresh", "1")
+    if (knownList.length > 0) qs.set("known", knownList.join(","))
+    const res = await fetch(`/api/wallpapers?${qs.toString()}`, { cache: "no-store" })
     if (!res.ok) {
       const msg = (await res.json().catch(() => null)) as { error?: string } | null
       throw new Error(msg?.error ?? "抓取失败")
@@ -122,12 +130,13 @@ export async function loadWallpaperPage(
     }
   }
 
-  // 过滤已下载 + 已屏蔽：游标深度扫描（与服务器端同一实现）
+  // 过滤已下载 + 已屏蔽 + 客户端已有：游标深度扫描（与服务器端同一实现）
+  const known = new Set(knownList)
   const scan = await scanSourcePages(
     cat,
     startPage,
     PAGE_SIZE,
-    (w) => !blocked.has(w.id) && !downloaded.has(w.id),
+    (w) => !blocked.has(w.id) && !downloaded.has(w.id) && !known.has(w.id),
     40,
     { fresh }
   )
@@ -158,6 +167,34 @@ async function fetchPageWithRetry(
     await new Promise((r) => setTimeout(r, 1200))
     return fetchWallpapers(cat, p, { fresh })
   }
+}
+
+/**
+ * 官网同步（v1.4.11）：只拉源站第 1 页最新壁纸（fresh），过滤已屏蔽
+ * （及可选的已下载）后返回 —— 供「窗口聚焦 / 定时增量同步」用，
+ * 不做深度扫描，开销极小（单页请求）。
+ */
+export async function fetchSiteFirstPage(
+  catKey: string,
+  hideDownloaded: boolean
+): Promise<ZhefengWallpaper[]> {
+  if (!IS_STATIC_EXPORT) {
+    const res = await fetch(
+      `/api/wallpapers?cat=${encodeURIComponent(catKey)}&cursor=1&hideDownloaded=${
+        hideDownloaded ? 1 : 0
+      }&fresh=1&sync=1`,
+      { cache: "no-store" }
+    )
+    if (!res.ok) throw new Error("同步失败")
+    const data = (await res.json()) as { items?: ZhefengWallpaper[] }
+    return data.items ?? []
+  }
+  // —— static：浏览器直连源站第 1 页 + 本地记录过滤 ——
+  const cat = findCategory(catKey)
+  const blocked = getLocalBlockedIds()
+  const downloaded = getLocalDownloadIds()
+  const batch = await fetchPageWithRetry(cat, 1, true)
+  return batch.filter((w) => !blocked.has(w.id) && (!hideDownloaded || !downloaded.has(w.id)))
 }
 
 /* ------------------------------ 记录操作（双模式） ------------------------------ */
