@@ -1,34 +1,26 @@
 /**
- * 壁纸工坊 · 桌面版扫码登录 + 原图下载模块（主进程，CommonJS）
+ * 壁纸工坊 · 桌面版扫码登录 + 令牌管理（主进程，CommonJS）
  * ============================================================
- * v1.4.7 桌面构建重构为「纯静态导出 + app:// 协议」后，渲染层不再有 Next
- * 服务端，扫码登录（依赖服务端抓取微信页面 / 长轮询 / ALTCHA 人机验证）
- * 随之消失——这正是用户反馈「最新版扫码登录没了」的根因。
- * v1.4.9 把整套登录链路搬进 Electron 主进程（Node 环境无 CORS 限制）：
+ * v2.0 阶段三拆分后职责单一：微信扫码登录 + 令牌存取/校验。
+ * 原内联的 ALTCHA 验证 → desktop/zf-certify.js；
+ * 原图下载 → desktop/original-download.js（OriginalDownloadService）。
  *
- * 1. 扫码登录（哲风壁纸 haowallpaper.com 微信登录，服务端全托管）：
+ * 1. 扫码登录（哲风壁纸 haowallpaper.com 微信登录，主进程全托管）：
  *    - 抓取微信 qrconnect 页面提取 uuid，二维码图片转 dataURL 传渲染层
  *      （app:// origin 直连微信图片会被 Referer 策略拦截）
  *    - 后台长轮询微信 lp 端点：408 等待 / 404 已扫 / 405 已确认 / 402 过期
  *    - 用户确认后主进程代替浏览器走官网 wxLogin 回调 → stateLogin 轮询拿令牌
  *    - 令牌写入 userData/ww-settings.json（跨版本升级永不丢）
- * 2. ALTCHA 人机验证（getCompleteUrl 的前置要求，会话缓存 8 分钟复用）
- * 3. 原图直存（v1.4.14 完整性硬校验）：先取官网详情页 JSON-LD 官方元数据
- *    （desktop/zf-meta.js：官方 width/height/contentSize，不硬编码任何固定
- *    尺寸）→ getCompleteUrl 换官网原图直链 → 下载字节经质量校验
- *    （desktop/image-quality.js：期望宽高逐一硬比对（杜绝裁切/缩放/改
- *    比例）+ 魔数识别真实格式 + 体积下限 + 预览图兜底拒绝，扩展名按真实
- *    内容定）后写入保存目录。链路全程原始字节直写，无任何 resize/crop/
- *    重编码。
+ * 2. verifyToken：getCompleteUrl 实测令牌有效性（只换直链不下载，
+ *    依赖 zf-certify 的 ALTCHA 会话）。
  *
- * 与服务器版 src/lib/zf-login.ts / zf-certify.ts / zf-meta.ts 逻辑逐行对齐。
+ * 与服务器版 src/lib/zf-login.ts 逻辑逐行对齐。
  */
 
 "use strict";
 
-const { createHash, randomUUID } = require("node:crypto");
-const { validateOriginalImage } = require("./image-quality.js");
-const { fetchOfficialOriginalMeta } = require("./zf-meta.js");
+const { randomUUID } = require("node:crypto");
+const { ensureCertified, invalidateCertification } = require("./zf-certify.js");
 
 const API_BASE = "https://haowallpaper.com";
 const ZF_WX_APPID = "wx5b6879182de50dd6";
@@ -37,16 +29,11 @@ const ZF_STATE_LOGIN_URL = `${API_BASE}/link/app/appUser/stateLogin`;
 const WX_QRCONNECT_URL = "https://open.weixin.qq.com/connect/qrconnect";
 const WX_LP_URL = "https://lp.open.weixin.qq.com/connect/l/qrconnect";
 
-const CERTIFY_CHALLENGE_URL = `${API_BASE}/link/pc/certify/challenge`;
-const CERTIFY_VERIFY_URL = `${API_BASE}/link/pc/certify/verify`;
-
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
 /** 二维码会话本地过期时间（毫秒） */
 const QR_SESSION_TTL_MS = 180 * 1000;
-/** ALTCHA 验证会话有效时长（官方 15 分钟内可用，保守取 8 分钟） */
-const CERTIFY_TTL_MS = 8 * 60 * 1000;
 
 function zfHeaders(extra) {
   return {
@@ -57,7 +44,7 @@ function zfHeaders(extra) {
   };
 }
 
-/** getCompleteUrl 直链接口（必须带 __media=1&__responseCodec=aeg-v2，否则 305/3004） */
+/** getCompleteUrl 直链接口（verifyToken 探测用；必须带必需查询参数） */
 function completeUrlOf(wtId) {
   return `${API_BASE}/link/common/file/getCompleteUrl/${encodeURIComponent(wtId)}?__media=1&__responseCodec=aeg-v2`;
 }
@@ -84,111 +71,6 @@ function collectCookies(res, jar) {
 function cookieHeader(jar) {
   if (!jar || jar.size === 0) return null;
   return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
-}
-
-/* ---------------- ALTCHA 人机验证 ---------------- */
-
-let certifySession = null; // { cookie, verifiedAt }
-let certifyInflight = null;
-
-function solveChallenge(challenge) {
-  const { salt, challenge: target, maxnumber } = challenge;
-  for (let n = 0; n <= maxnumber; n++) {
-    const hash = createHash("sha256").update(salt + n).digest("hex");
-    if (hash === target) return n;
-  }
-  return null;
-}
-
-function collectSessionCookie(res) {
-  try {
-    const list =
-      typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
-    for (const raw of list) {
-      const pair = String(raw).split(";")[0].trim();
-      if (pair.startsWith("server_session_")) return pair;
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-/** 执行一次完整 ALTCHA 验证（挑战 → PoW → 提交） */
-async function runCertification() {
-  const chalRes = await fetch(CERTIFY_CHALLENGE_URL, {
-    headers: { "User-Agent": UA, Referer: `${API_BASE}/`, Accept: "application/json" },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!chalRes.ok) throw new Error(`获取人机验证挑战失败（HTTP ${chalRes.status}）`);
-
-  const cookie = collectSessionCookie(chalRes) || "";
-  const challenge = await chalRes.json().catch(() => null);
-  if (!challenge || !challenge.challenge || !challenge.salt) {
-    throw new Error("人机验证挑战数据异常");
-  }
-
-  const number = solveChallenge(challenge);
-  if (number === null) throw new Error("人机验证工作量证明求解失败");
-
-  const payload = Buffer.from(
-    JSON.stringify({
-      algorithm: challenge.algorithm,
-      challenge: challenge.challenge,
-      number,
-      salt: challenge.salt,
-      signature: challenge.signature,
-    })
-  ).toString("base64");
-
-  const verifyRes = await fetch(`${CERTIFY_VERIFY_URL}?__media=1&__responseCodec=aeg-v2`, {
-    method: "POST",
-    headers: {
-      "User-Agent": UA,
-      Referer: `${API_BASE}/`,
-      Origin: API_BASE,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(cookie ? { Cookie: cookie } : {}),
-    },
-    body: JSON.stringify({ payload }),
-    signal: AbortSignal.timeout(20000),
-  });
-
-  const refreshedCookie = collectSessionCookie(verifyRes);
-  const finalCookie = refreshedCookie || cookie;
-  const json = await verifyRes.json().catch(() => null);
-  if (Number(json?.status ?? -1) !== 200 || !finalCookie) {
-    throw new Error(`人机验证未通过（${json?.msg || `HTTP ${verifyRes.status}`}）`);
-  }
-  return { cookie: finalCookie, verifiedAt: Date.now() };
-}
-
-/** 确保已通过人机验证，返回应回放的 Cookie；失败返回 null */
-async function ensureCertified(force = false) {
-  if (!force && certifySession && Date.now() - certifySession.verifiedAt < CERTIFY_TTL_MS) {
-    return certifySession.cookie;
-  }
-  if (certifyInflight) return certifyInflight.then((s) => s.cookie).catch(() => null);
-
-  certifyInflight = (async () => {
-    const s = await runCertification();
-    certifySession = s;
-    return s;
-  })();
-
-  try {
-    const s = await certifyInflight;
-    return s.cookie;
-  } catch {
-    return null;
-  } finally {
-    certifyInflight = null;
-  }
-}
-
-function invalidateCertification() {
-  certifySession = null;
 }
 
 /* ---------------- 扫码会话 ---------------- */
@@ -410,13 +292,10 @@ async function finalizeLogin(s, wxCode) {
  * @param deps
  *   - readSettings(): object               读 userData 设置（含 zfToken 字段）
  *   - writeSettings(s): void               写设置（令牌持久化）
- *   - getSaveDir(): string                 壁纸保存目录
- *   - uniqueSavePath(dir, name): string    同名不覆盖的保存路径
- *   - log(line): void                      可选：主进程运行日志（质量闸门
- *                                          决策写审计轨迹；缺省 no-op）
+ *   - log(line): void                      可选：主进程运行日志（缺省 no-op）
  */
 function createLoginModule(deps) {
-  const { readSettings, writeSettings, getSaveDir, uniqueSavePath, log = () => {} } = deps;
+  const { readSettings, writeSettings, log = () => {} } = deps;
 
   /** 令牌脱敏展示：保留前 8 后 4 位 */
   const maskToken = (token) =>
@@ -502,44 +381,43 @@ function createLoginModule(deps) {
           await saveToken(s.token, "qrcode");
           s.tokenSaved = true;
         } catch {
-          return { status: "error", msg: "令牌保存失败" };
+          /* 入库失败不阻塞返回，下次轮询重试 */
         }
       }
-      return { status: "ok" };
+      return { status: "ok", msg: "登录成功，令牌已保存" };
     }
-    if (s.phase === "expired") return { status: "expired", msg: s.msg || null };
-    if (s.phase === "error") return { status: "error", msg: s.msg || "登录状态异常，请刷新重试" };
-    if (s.phase === "scanned") return { status: "scanned", msg: s.msg || null };
-    return { status: "pending", msg: s.msg || null };
+    if (s.phase === "expired") return { status: "expired", msg: s.msg || "二维码已过期" };
+    if (s.phase === "error") return { status: "error", msg: s.msg || "登录失败" };
+    return {
+      status: s.phase === "scanned" ? "scanned" : "pending",
+      msg: s.msg || undefined,
+    };
   };
 
   /* ----- 令牌验证（getCompleteUrl 实测，只换直链不下载） ----- */
 
   const verifyToken = async (wtId) => {
-    const id = String(wtId || "");
-    if (!/^[0-9A-Za-z_-]{1,64}$/.test(id)) {
-      return { valid: null, msg: "缺少有效的壁纸 id，无法验证令牌" };
-    }
     const token = rawToken();
-    if (!token) return { valid: null, msg: "no-token" };
+    if (!token) return { valid: false, msg: "尚未登录" };
+    const id = /^[0-9A-Za-z_-]{1,64}$/.test(String(wtId || "")) ? wtId : null;
 
     const probe = async () => {
       try {
         const cookie = await ensureCertified();
-        const res = await fetch(completeUrlOf(id), {
+        const res = await fetch(completeUrlOf(id || "0"), {
           headers: zfHeaders({ token, ...(cookie ? { Cookie: cookie } : {}) }),
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(15000),
         });
+        if (res.status === 429) return { valid: null, msg: "官网限流中，稍后再验证" };
         const json = await res.json().catch(() => null);
-        if (json && digUrl(json)) return { valid: true };
+        if (json && digUrl(json)) return { valid: true, msg: "令牌有效（可获取原图直链）" };
         const status = Number(json?.status ?? -1);
         const msg = typeof json?.msg === "string" ? json.msg.trim() : "";
-        if (status === 401 || /未授权/.test(msg)) {
-          return { valid: false, msg: (msg || `HTTP ${res.status}`).slice(0, 80) };
-        }
-        return { valid: null, msg: (msg || `HTTP ${res.status}`).slice(0, 80) };
-      } catch {
-        return { valid: null, msg: "官网连接异常，未能验证" };
+        if (status === 401 || /未授权/.test(msg)) return { valid: false, msg: "令牌已失效，请重新扫码" };
+        if (status === 305) return { valid: null, msg: `人机验证会话异常（3004/3005），稍后再试` };
+        return { valid: null, msg: msg || `官网响应异常（HTTP ${res.status}）` };
+      } catch (e) {
+        return { valid: null, msg: `探测失败：${e instanceof Error ? e.message : "网络异常"}` };
       }
     };
 
@@ -552,178 +430,7 @@ function createLoginModule(deps) {
     return result;
   };
 
-  /* ----- 原图直存（串行队列：避免 ALTCHA 会话并发竞争） ----- */
-
-  let dlChain = Promise.resolve();
-
-  /** 校验失败码 → 结果 reason（UI 据此弹对应文案） */
-  const reasonOfCode = (code) =>
-    ({
-      DOWNLOAD_RESOLUTION_MISMATCH: "resolution-mismatch",
-      DOWNLOAD_FORMAT_MISMATCH: "format-mismatch",
-      DOWNLOAD_SHA256_MISMATCH: "sha-mismatch",
-      DOWNLOAD_SIZE_MISMATCH: "size-mismatch",
-      DOWNLOAD_QUALITY_MISMATCH: "quality-mismatch",
-    })[code] || "error";
-
-  /**
-   * 单次原图直存（v1.4.14 完整性硬校验）：
-   * 官方元数据（期望宽高/体积下限） → ALTCHA → getCompleteUrl → 下载字节
-   * → 质量校验（不通过绝不落盘）→ 原始字节直接写入保存目录。
-   * 元数据取不到时退回 v1.4.13 预览兑底闸门（绝不因元数据抖动阻断下载）。
-   */
-  const runOriginalDownload = async (wtId, filename) => {
-    const token = rawToken();
-    if (!token) return { ok: false, quality: "preview", reason: "no-token" };
-
-    const id = /^[0-9A-Za-z_-]{1,64}$/.test(String(wtId || "")) ? wtId : null;
-    if (!id) return { ok: false, quality: "preview", reason: "error", msg: "壁纸 id 不合法" };
-
-    // 官网详情页 JSON-LD 官方元数据（期望宽高的唯一权威来源；非致命）
-    const meta = await fetchOfficialOriginalMeta(id);
-    const expect = meta
-      ? {
-          width: meta.width,
-          height: meta.height,
-          // 体积下限：官方 contentSize 的 50%（辅助线，仅拦「同尺寸重压缩缩水」）
-          ...(meta.contentSizeBytes ? { minBytes: Math.floor(meta.contentSizeBytes * 0.5) } : {}),
-        }
-      : undefined;
-    if (meta) {
-      log(`原图期望（官网元数据）：${meta.width}×${meta.height}` +
-        (meta.contentSizeBytes ? `，约 ${(meta.contentSizeBytes / 1024 / 1024).toFixed(2)}MB` : ""));
-    } else {
-      log("官网元数据不可用：退回预览兑底闸门（长边≤1100px 拒绝）");
-    }
-
-    let target = null;
-    try {
-      const cookie = await ensureCertified();
-      const res = await fetch(completeUrlOf(id), {
-        headers: zfHeaders({ token, ...(cookie ? { Cookie: cookie } : {}) }),
-        signal: AbortSignal.timeout(15000),
-      });
-      if (res.status === 429) {
-        return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
-      }
-      const json = await res.json().catch(() => null);
-      target = json ? digUrl(json) : null;
-      if (!target) {
-        const status = Number(json?.status ?? -1);
-        const msg = typeof json?.msg === "string" ? json.msg.trim() : "";
-        if (status === 401 || /未授权/.test(msg)) {
-          return { ok: false, quality: "preview", reason: "auth-expired", msg };
-        }
-        if (status === 305) {
-          // 人机验证可能过期：重验一次
-          invalidateCertification();
-          const cookie2 = await ensureCertified(true);
-          const res2 = await fetch(completeUrlOf(id), {
-            headers: zfHeaders({ token, ...(cookie2 ? { Cookie: cookie2 } : {}) }),
-            signal: AbortSignal.timeout(15000),
-          });
-          if (res2.status === 429) {
-            return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
-          }
-          const json2 = await res2.json().catch(() => null);
-          target = json2 ? digUrl(json2) : null;
-          const status2 = Number(json2?.status ?? -1);
-          const msg2 = typeof json2?.msg === "string" ? json2.msg.trim() : "";
-          if (!target) {
-            if (status2 === 401 || /未授权/.test(msg2)) {
-              return { ok: false, quality: "preview", reason: "auth-expired", msg: msg2 };
-            }
-            return { ok: false, quality: "preview", reason: "error", msg: msg2 || `官网接口异常（HTTP ${status2}）` };
-          }
-        } else {
-          return { ok: false, quality: "preview", reason: "error", msg: msg || `官网接口异常（HTTP ${res.status}）` };
-        }
-      }
-    } catch (e) {
-      return {
-        ok: false,
-        quality: "preview",
-        reason: "error",
-        msg: e instanceof Error ? e.message : "官网连接异常",
-      };
-    }
-
-    // 下载原图字节 → 质量校验（不通过绝不落盘）→ 写入保存目录
-    try {
-      const upstream = await fetch(target, {
-        headers: zfHeaders({ token }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (upstream.status === 429) {
-        return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
-      }
-      if (!upstream.ok) {
-        return { ok: false, quality: "preview", reason: "error", msg: `原图下载失败（HTTP ${upstream.status}）` };
-      }
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      if (buf.length === 0) return { ok: false, quality: "preview", reason: "error", msg: "原图内容为空" };
-
-      // ---- v1.4.14 质量硬闸门：期望宽高逐一硬比对 + 字节级校验，
-      // ---- 预览图/裁切/缩放/改比例/重压缩/未知格式一律拒绝保存
-      const check = validateOriginalImage(buf, expect);
-      if (!check.ok) {
-        log(`质量闸门拦截 [${check.code}]：${check.msg}`);
-        return {
-          ok: false,
-          quality: "preview",
-          reason: check.code === "FORMAT_UNKNOWN" ? "error" : reasonOfCode(check.code),
-          msg: check.msg,
-          width: check.width,
-          height: check.height,
-          expectedWidth: check.expectedWidth,
-          expectedHeight: check.expectedHeight,
-        };
-      }
-
-      // 文件名：清洗 + 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
-      const clean = String(filename || "wallpaper")
-        .replace(/[\\/:*?"<>|]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 60) || "wallpaper";
-      const savePath = uniqueSavePath(getSaveDir(), `${clean}.${check.ext}`);
-      const fs = require("node:fs");
-      fs.writeFileSync(savePath, buf);
-      log(`原图已保存：${savePath}（${check.width}×${check.height} ${check.format} ` +
-        `${(check.bytes / 1024 / 1024).toFixed(2)}MB，期望 ${expect ? `${expect.width}×${expect.height}` : "无"}，` +
-        `sha256:${createHash("sha256").update(buf).digest("hex").slice(0, 16)}）`);
-      return {
-        ok: true,
-        quality: "original",
-        savedPath: savePath,
-        width: check.width,
-        height: check.height,
-        aspectRatio: check.aspectRatio,
-        format: check.format,
-        bytes: check.bytes,
-        expectedWidth: expect ? expect.width : undefined,
-        expectedHeight: expect ? expect.height : undefined,
-        metaVerified: !!expect,
-      };
-    } catch (e) {
-      return {
-        ok: false,
-        quality: "preview",
-        reason: "error",
-        msg: e instanceof Error ? e.message : "原图保存失败",
-      };
-    }
-  };
-
-  /** 入队一次原图下载（串行执行，返回统一结果） */
-  const downloadOriginal = (wtId, filename) => {
-    const task = dlChain.then(() => runOriginalDownload(wtId, filename));
-    // 链上异常不阻塞后续任务
-    dlChain = task.catch(() => undefined);
-    return task;
-  };
-
-  return { loginStart, loginPoll, getToken, saveToken, clearToken, verifyToken, downloadOriginal };
+  return { loginStart, loginPoll, getToken, saveToken, clearToken, verifyToken, rawToken };
 }
 
 module.exports = { createLoginModule };

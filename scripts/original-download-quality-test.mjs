@@ -552,21 +552,34 @@ for (const [name, buf, expectOk] of cjsCases) {
 
 /* ---------- 测试 C2：桌面主进程下载链路集成（stub 官网，字节真实） ---------- */
 
-console.log("\n[C2] 桌面主进程 downloadOriginal 集成断言（zf-login.js + zf-meta.js + 质量闸门）：");
+console.log("\n[C2] 桌面主进程 OriginalDownloadService 集成断言（original-download.js + zf-certify.js + zf-meta.js + history-db.js + 质量闸门）：");
 try {
   const os = await import("node:os");
   const pathMod = await import("node:path");
   const fsMod = await import("node:fs");
   const { createLoginModule } = await import("../desktop/zf-login.js");
+  const { createHistoryDb } = await import("../desktop/history-db.js");
+  const { createOriginalDownloadService } = await import("../desktop/original-download.js");
 
   const realFetch = globalThis.fetch;
   const tmpDir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), "ww-qtest-"));
   const savedFiles = [];
+  const pngFiles = () => fsMod.readdirSync(tmpDir).filter((f) => f.endsWith(".png") || f.endsWith(".webp"));
 
-  const makeModule = () =>
-    createLoginModule({
-      readSettings: () => ({ zfToken: "integration-test-token-1234567890" }),
+  /** 组装完整下载栈（登录 + SQLite 历史 + 下载服务） */
+  const makeStack = (settings) => {
+    const login = createLoginModule({
+      readSettings: () => settings,
       writeSettings: () => {},
+      log: () => {},
+    });
+    const history = createHistoryDb({
+      dbFile: () => pathMod.join(tmpDir, "history-main.db"),
+      legacyStoreFile: () => pathMod.join(tmpDir, "no-store.json"),
+      log: () => {},
+    });
+    const service = createOriginalDownloadService({
+      rawToken: () => login.rawToken(),
       getSaveDir: () => tmpDir,
       uniqueSavePath: (dir, name) => {
         let p = pathMod.join(dir, name);
@@ -574,21 +587,29 @@ try {
         while (fsMod.existsSync(p)) p = pathMod.join(dir, name.replace(/(\.\w+)$/, ` ($1)`).replace(".", `(${i}).`));
         return p;
       },
+      history,
       log: () => {},
     });
+    return { login, history, download: service.download };
+  };
 
   /** 构造 stub fetch：详情页返回官方元数据 JSON-LD（期望 4096×2160），
    *  getCompleteUrl 换链成功，CDN 返回指定字节 */
-  const stubFetchWith = (cdnBytes, { metaOk = true } = {}) => {
+  const stubFetchWith = (cdnBytes, { metaOk = true, schemaType = "ImageObject", descHint = "静态" } = {}) => {
     globalThis.fetch = async (url) => {
       const u = String(url);
       if (u.includes("homeViewLook/")) {
         if (!metaOk) return new Response("Server Error", { status: 500 });
         const html =
           '<script type="application/ld+json">{"@context":"https://schema.org",' +
-          '"name":"集成测试壁纸","contentUrl":"https://img.haowallpaper.com/pre_cache_file/fake.png",' +
+          `"@type":"${schemaType}",` +
+          `"name":"集成测试壁纸","description":"壁纸特征：4K ${descHint}电脑壁纸",` +
+          '"contentUrl":"https://img.haowallpaper.com/pre_cache_file/fake.png",' +
           '"width":4096,"height":2160,"contentSize":"8.32 MB"}</script>';
         return new Response(html, { headers: { "content-type": "text/html" } });
+      }
+      if (u.includes("certify/")) {
+        return new Response(JSON.stringify({ code: 200, data: { salt: "s", challenge: "c", maxnumber: 10, algorithm: "SHA-256" } }), { headers: { "content-type": "application/json" } });
       }
       if (u.includes("getCompleteUrl")) {
         return new Response(JSON.stringify({ status: 200, data: { url: "https://fake-cdn/original.png" } }), {
@@ -599,14 +620,16 @@ try {
     };
   };
 
+  const TOKEN_SETTINGS = { zfToken: "integration-test-token-1234567890" };
+
   // 场景 1：官方元数据 4096×2160，CDN 却回 3840×2160（等 AR 缩放）
   // → 主进程必须拒绝（resolution-mismatch），保存目录零新增
   {
-    const mod = makeModule();
-    const before = fsMod.readdirSync(tmpDir).length;
+    const { download } = makeStack(TOKEN_SETTINGS);
+    const before = pngFiles().length;
     stubFetchWith(makePng(3840, 2160, { noise: true }));
-    const r = await mod.downloadOriginal("70010000000000001", "集成-分辨率拦截");
-    const after = fsMod.readdirSync(tmpDir).length;
+    const r = await download({ id: "70010000000000001", wtId: "70010000000000001", title: "集成-分辨率拦截", category: "computer" });
+    const after = pngFiles().length;
     check(
       "C2: CDN 回 3840×2160（官方 4096×2160）→ 拒绝（resolution-mismatch）",
       r.ok === false && r.reason === "resolution-mismatch",
@@ -617,11 +640,11 @@ try {
 
   // 场景 2：CDN 回裁切版 4096×2000 → 拒绝且零落盘
   {
-    const mod = makeModule();
-    const before = fsMod.readdirSync(tmpDir).length;
+    const { download } = makeStack(TOKEN_SETTINGS);
+    const before = pngFiles().length;
     stubFetchWith(makePng(4096, 2000, { noise: true }));
-    const r = await mod.downloadOriginal("70010000000000002", "集成-裁切拦截");
-    const after = fsMod.readdirSync(tmpDir).length;
+    const r = await download({ id: "70010000000000002", wtId: "70010000000000002", title: "集成-裁切拦截", category: "computer" });
+    const after = pngFiles().length;
     check(
       "C2: CDN 回裁切 4096×2000 → 拒绝（resolution-mismatch）",
       r.ok === false && r.reason === "resolution-mismatch"
@@ -630,15 +653,16 @@ try {
   }
 
   // 场景 3：CDN 回 4096×2160 真像素 PNG → 成功保存；落盘字节 SHA 与下载
-  // 字节 SHA 完全一致（原始字节直写证明：无 resize/crop/重编码）
+  // 字节 SHA 完全一致（原始字节直写证明：无 resize/crop/重编码）；
+  // v2.0：SQLite 历史同步写入全字段
   {
-    const mod = makeModule();
+    const { download } = makeStack(TOKEN_SETTINGS);
     const cdnBytes = makePng(4096, 2160, { noise: true });
     stubFetchWith(cdnBytes);
-    const r = await mod.downloadOriginal("70010000000000003", "集成-原图放行");
+    const r = await download({ id: "70010000000000003", wtId: "70010000000000003", title: "集成-原图放行", category: "computer" });
     check(
-      "C2: 4096×2160 原图字节 → 成功（original）且期望校验生效",
-      r.ok === true && r.quality === "original" && r.width === 4096 && r.height === 2160 && r.metaVerified === true,
+      "C2: 4096×2160 原图字节 → 成功且期望校验生效（metaVerified）",
+      r.ok === true && r.width === 4096 && r.height === 2160 && r.metaVerified === true,
       r.savedPath ? pathMod.basename(r.savedPath) : JSON.stringify(r).slice(0, 80)
     );
     if (r.savedPath) {
@@ -654,16 +678,81 @@ try {
         `sha256:${diskSha.slice(0, 16)}`
       );
     }
+    // v2.0 阶段五：重开历史库（模拟应用重启）验证记录持久化
+    const histReopen = createHistoryDb({
+      dbFile: () => pathMod.join(tmpDir, "history-main.db"),
+      legacyStoreFile: () => pathMod.join(tmpDir, "no-store.json"),
+      log: () => {},
+    });
+    const rec = await histReopen.getRecord("70010000000000003");
+    check(
+      "C2: SQLite 历史已写入（宽高/格式/大小/SHA/路径/分类/时间全字段，重启仍在）",
+      !!rec && rec.width === 4096 && rec.height === 2160 && rec.format === "png" &&
+        rec.bytes === cdnBytes.length && !!rec.sha256 && !!rec.savedPath && rec.category === "computer" && rec.downloadedAt > 0,
+      rec ? `${rec.width}×${rec.height} ${rec.format} ${rec.bytes}B` : "record missing"
+    );
+    check(
+      "C2: 历史记录 SHA-256 与落盘字节一致",
+      !!rec && rec.sha256 === sha256(cdnBytes),
+      rec?.sha256?.slice(0, 16) ?? ""
+    );
+    const listAll = await histReopen.listDownloads({});
+    check("C2: listDownloads 返回记录", listAll.length >= 1, `n=${listAll.length}`);
+    check(
+      "C2: 文件存在检测 fileExists=true",
+      listAll.length > 0 && listAll[0].fileExists === true,
+      String(listAll[0]?.fileExists)
+    );
+    // 手动删除文件后重读 → fileExists=false（记录保留）
+    if (r.savedPath) {
+      fsMod.rmSync(r.savedPath, { force: true });
+      const listAfterDelete = await histReopen.listDownloads({});
+      check(
+        "C2: 用户删除本地文件 → fileExists=false 且记录保留",
+        listAfterDelete.length >= 1 && listAfterDelete[0].fileExists === false,
+        String(listAfterDelete[0]?.fileExists)
+      );
+    }
+  }
+
+  // 场景 3b（v2.0）：重复下载同一张 → already-downloaded（零官网请求）
+  {
+    const { download } = makeStack(TOKEN_SETTINGS);
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    };
+    const r = await download({ id: "70010000000000003", wtId: "70010000000000003", title: "集成-重复下载", category: "computer" });
+    check(
+      "C2: 重复下载同一张 → already-downloaded 且零官网请求",
+      r.ok === false && r.reason === "already-downloaded" && fetchCalls === 0,
+      `calls=${fetchCalls}`
+    );
+  }
+
+  // 场景 3c（v2.0）：动态壁纸（JSON-LD @type=VideoObject）→ 拒绝下载
+  {
+    const { download } = makeStack(TOKEN_SETTINGS);
+    const before = pngFiles().length;
+    stubFetchWith(makePng(4096, 2160, { noise: true }), { schemaType: "VideoObject", descHint: "动态" });
+    const r = await download({ id: "70010000000000009", wtId: "70010000000000009", title: "集成-动态拒绝", category: "computer" });
+    const after = pngFiles().length;
+    check(
+      "C2: 动态壁纸（@type=VideoObject）→ 拒绝（dynamic）零落盘",
+      r.ok === false && r.reason === "dynamic" && after === before,
+      r.reason ?? ""
+    );
   }
 
   // 场景 4：元数据不可用（详情页 500）+ CDN 回官网真实 890px 预览字节
   // → 退回 v1.4.13 兜底闸门拒绝（quality-mismatch），零落盘
   {
-    const mod = makeModule();
-    const before = fsMod.readdirSync(tmpDir).length;
+    const { download } = makeStack(TOKEN_SETTINGS);
+    const before = pngFiles().length;
     stubFetchWith(previewBytesList[0], { metaOk: false });
-    const r = await mod.downloadOriginal("70010000000000004", "集成-元数据降级");
-    const after = fsMod.readdirSync(tmpDir).length;
+    const r = await download({ id: "70010000000000004", wtId: "70010000000000004", title: "集成-元数据降级", category: "computer" });
+    const after = pngFiles().length;
     check(
       "C2: 元数据不可用 + 890px 预览 → 兜底闸门拒绝（quality-mismatch）",
       r.ok === false && r.reason === "quality-mismatch",
@@ -674,19 +763,13 @@ try {
 
   // 场景 5：令牌缺失 → no-token（不发起任何下载）
   {
-    const mod = createLoginModule({
-      readSettings: () => ({}),
-      writeSettings: () => {},
-      getSaveDir: () => tmpDir,
-      uniqueSavePath: (d, n) => pathMod.join(d, n),
-      log: () => {},
-    });
+    const { download } = makeStack({});
     let fetchCalled = false;
     globalThis.fetch = async () => {
       fetchCalled = true;
       return new Response("{}", { headers: { "content-type": "application/json" } });
     };
-    const r = await mod.downloadOriginal("70010000000000005", "集成-无令牌");
+    const r = await download({ id: "70010000000000005", wtId: "70010000000000005", title: "集成-无令牌", category: "computer" });
     check(
       "C2: 无令牌 → no-token 且不发起网络请求",
       r.ok === false && r.reason === "no-token" && fetchCalled === false
@@ -716,6 +799,8 @@ if (!token) {
   const pathMod = await import("node:path");
   const fsMod = await import("node:fs");
   const { createLoginModule } = await import("../desktop/zf-login.js");
+  const { createHistoryDb } = await import("../desktop/history-db.js");
+  const { createOriginalDownloadService } = await import("../desktop/original-download.js");
   const tmpDir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), "ww-golden-"));
 
   try {
@@ -749,15 +834,25 @@ if (!token) {
         `${refInfo?.format} ${mb(refBuf.length)}`
       );
 
-      // ④ 项目链路：zf-login 模块（主进程同款逻辑）下载落盘
-      const mod = createLoginModule({
+      // ④ 项目链路：OriginalDownloadService（主进程同款逻辑）下载落盘
+      const login = createLoginModule({
         readSettings: () => ({ zfToken: token }),
         writeSettings: () => {},
-        getSaveDir: () => tmpDir,
-        uniqueSavePath: (d, n) => pathMod.join(d, n),
         log: () => {},
       });
-      const r = await mod.downloadOriginal(g.wtId, `金基准-${g.title}`);
+      const history = createHistoryDb({
+        dbFile: () => pathMod.join(tmpDir, `golden-${g.wtId}.db`),
+        legacyStoreFile: () => pathMod.join(tmpDir, "no-store.json"),
+        log: () => {},
+      });
+      const download = createOriginalDownloadService({
+        rawToken: () => login.rawToken(),
+        getSaveDir: () => tmpDir,
+        uniqueSavePath: (d, n) => pathMod.join(d, n),
+        history,
+        log: () => {},
+      });
+      const r = await download({ id: g.wtId, wtId: g.wtId, title: `金基准-${g.title}` });
       if (!r.ok) {
         check(`D: ${label} 项目链路下载`, false, `${r.reason}: ${r.msg ?? ""}`);
         continue;

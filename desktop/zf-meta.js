@@ -70,12 +70,17 @@ function extractMetaFromDetailHtml(html) {
     const h = Number(obj.height);
     const cu = typeof obj.contentUrl === "string" ? obj.contentUrl : "";
     if (Number.isInteger(w) && w > 0 && Number.isInteger(h) && h > 0 && cu.includes("haowallpaper.com")) {
+      const nameAndDesc = `${typeof obj.name === "string" ? obj.name : ""} ${
+        typeof obj.description === "string" ? obj.description : ""
+      }`;
       return {
         width: w,
         height: h,
         contentUrl: cu,
         contentSizeBytes: parseContentSizeBytes(obj.contentSize),
         title: typeof obj.name === "string" ? obj.name.slice(0, 120) : null,
+        schemaType: typeof obj["@type"] === "string" ? obj["@type"] : null,
+        staticHint: /动态/.test(nameAndDesc) ? "dynamic" : /静态/.test(nameAndDesc) ? "static" : null,
       };
     }
   }
@@ -89,6 +94,8 @@ function extractMetaFromDetailHtml(html) {
       contentUrl: cu2[1],
       contentSizeBytes: null,
       title: null,
+      schemaType: null,
+      staticHint: null,
     };
   }
   return null;
@@ -138,4 +145,15 @@ async function fetchOfficialOriginalMeta(wtId) {
   }
 }
 
-module.exports = { fetchOfficialOriginalMeta, extractMetaFromDetailHtml, parseContentSizeBytes };
+/**
+ * v2.0：官网元数据是否明确为静态图片（ImageObject 且描述非动态）。
+ * 与 src/lib/zf-meta.ts 的 metaIsStaticImage 逐行对齐。
+ */
+function metaIsStaticImage(meta) {
+  if (!meta) return false;
+  if (meta.schemaType && meta.schemaType !== "ImageObject") return false;
+  if (meta.staticHint === "dynamic") return false;
+  return true;
+}
+
+module.exports = { fetchOfficialOriginalMeta, extractMetaFromDetailHtml, parseContentSizeBytes, metaIsStaticImage };

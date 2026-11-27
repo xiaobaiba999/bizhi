@@ -8,12 +8,17 @@
  * - app:// 自定义标准协议加载本地渲染层（而非 file://）：
  *   ① origin 固定为 app://local，localStorage 跨次启动稳定
  *   ② 绝对路径 /_next/... 按 http 语义解析，无需相对路径改写
- * - v1.4.8 记录文件真源：屏蔽/下载记录同步镜像到 userData/ww-store.json
+ * - v1.4.8 记录文件真源：屏蔽记录同步镜像到 userData/ww-store.json
  *   （preload 桥双向同步；localStorage 损坏/丢失时从文件完整恢复），
- *   跨版本升级永不丢，退出前强制落盘
- * - 下载接管（will-download）：壁纸自动保存到「图片/WallpaperWorkshop」，
- *   也支持用户自主选择保存目录（userData/ww-settings.json 记忆）；
- *   批量下载不弹对话框；完成弹系统通知，点击通知打开保存文件夹
+ *   跨版本升级永不丢，退出前强制落盘；
+ *   v2.0：下载历史升级为 SQLite（userData/ww-history.db，history-db.js），
+ *   旧 ww-store.json 的下载记录自动迁移，屏蔽记录仍在 ww-store.json
+ * - 下载保存（v2.0）：主进程 OriginalDownloadService（original-download.js）
+ *   统一链路：本地记录检查 → 登录检查 → 官网元数据（含动态壁纸拒绝）→
+ *   ALTCHA → getCompleteUrl 签名直链 → 原始字节 → 质量硬校验 → 直存 →
+ *   写入 SQLite 历史。串行拟人节奏 + 官网风控熔断。
+ *   旧 will-download 浏览器下载接管已移除（死代码：桌面版全部下载均由
+ *   主进程直存，不再经过会话下载）
  * - 微信扫码登录（v1.4.9，zf-login.js）：主进程托管哲风壁纸微信登录
  *   全链路（二维码 dataURL → lp 长轮询 → 官网回调换令牌），令牌持久化在
  *   ww-settings.json；下载原图走「ALTCHA 人机验证 + getCompleteUrl」拿
@@ -27,7 +32,7 @@
 
 "use strict";
 
-const { app, BrowserWindow, Menu, dialog, Notification, ipcMain, protocol, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, protocol, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -251,29 +256,53 @@ ipcMain.handle("ww:select-save-dir", async () => {
   return chooseSaveDir(win);
 });
 
-/* ---------------- 扫码登录 + 原图直存（v1.4.9，主进程托管） ---------------- */
+/* ---------------- 扫码登录 + 原图下载（v2.0 模块化） ---------------- */
 
 /**
- * 登录模块（desktop/zf-login.js）：扫码登录 / 令牌存取 / 原图直存。
- * 令牌持久化在 userData/ww-settings.json（zfToken 字段），跨版本升级永不丢；
- * 原图直存串行队列，下载字节直接写入壁纸保存目录。
- *
- * v1.4.10：require 包 try/catch —— 登录模块万一加载失败，只降级登录/原图
- * 功能（界面明确提示），绝不拖死整个应用（无窗口静默退出）。
+ * 模块拆分（v2.0 阶段三）：
+ * - zf-login.js：扫码登录 / 令牌存取与校验
+ * - zf-certify.js：ALTCHA 人机验证（getCompleteUrl 前置）
+ * - original-download.js：OriginalDownloadService（统一下载链路）
+ * - history-db.js：SQLite 永久下载历史（userData/ww-history.db）
+ * 任一模块加载失败只降级对应功能（界面明确提示），绝不拖死整个应用。
  */
 let login = null;
+let history = null;
+let downloadService = null;
 try {
   const { createLoginModule } = require("./zf-login.js");
-  login = createLoginModule({
-    readSettings,
-    writeSettings,
-    getSaveDir,
-    uniqueSavePath,
-    log, // v1.4.14：质量闸门决策写运行日志（审计轨迹）
-  });
+  login = createLoginModule({ readSettings, writeSettings, log });
 } catch (e) {
   login = null;
-  log(`登录模块加载失败（浏览/屏蔽/下载不受影响，仅扫码登录与原图直存不可用）：${errText(e)}`);
+  log(`登录模块加载失败（浏览不受影响，仅扫码登录不可用）：${errText(e)}`);
+}
+try {
+  const { createHistoryDb } = require("./history-db.js");
+  history = createHistoryDb({
+    dbFile: () => path.join(USER_DATA(), "ww-history.db"),
+    legacyStoreFile: STORE_FILE,
+    log,
+  });
+} catch (e) {
+  history = null;
+  log(`历史库模块加载失败（下载不受影响，仅历史记录不可用）：${errText(e)}`);
+}
+try {
+  if (login && history) {
+    const { createOriginalDownloadService } = require("./original-download.js");
+    downloadService = createOriginalDownloadService({
+      rawToken: () => login.rawToken(),
+      getSaveDir,
+      uniqueSavePath,
+      history,
+      log,
+    });
+  } else {
+    log("下载服务未初始化（登录或历史模块缺失）");
+  }
+} catch (e) {
+  downloadService = null;
+  log(`下载服务加载失败：${errText(e)}`);
 }
 
 /** 登录 IPC 兜底包装：模块缺失时返回统一的降级结果 */
@@ -294,11 +323,98 @@ ipcMain.handle("ww:login-clear-token", loginCall("clearToken", false));
 
 ipcMain.handle("ww:login-verify", loginCall("verifyToken", { valid: null, msg: LOGIN_DOWN.error }));
 
-ipcMain.handle("ww:download-original", loginCall("downloadOriginal", { ok: false, quality: "preview", reason: "error", msg: LOGIN_DOWN.error }));
+/** 原图下载（OriginalDownloadService 统一链路） */
+ipcMain.handle("ww:download-original", (_e, wp) =>
+  downloadService
+    ? downloadService.download(wp)
+    : Promise.resolve({
+        ok: false,
+        reason: "error",
+        msg: "下载服务未能加载，请通过菜单「帮助 → 打开运行日志」查看原因",
+      })
+);
 
-// 退出前强制把待写的记录真源落盘（防抖漏写兜底）
-app.on("before-quit", flushStoreNow);
-app.on("will-quit", flushStoreNow);
+/* ---------------- 下载历史 IPC（v2.0 阶段五） ---------------- */
+
+const HISTORY_DOWN = { ok: false, error: "历史库未就绪" };
+
+/** 历史记录列表（可按分类过滤，含文件存在检测） */
+ipcMain.handle("ww:history-list", (_e, filter) =>
+  history ? history.listDownloads(filter || {}) : Promise.resolve([])
+);
+
+/** 全部已下载 id 集合（列表「隐藏已下载」过滤用） */
+ipcMain.handle("ww:history-ids", () =>
+  history ? history.getDownloadIds() : Promise.resolve(new Set())
+);
+
+ipcMain.handle("ww:history-count", () =>
+  history ? history.countDownloads() : Promise.resolve(0)
+);
+
+/** 打开本地文件（系统默认看图工具） */
+ipcMain.handle("ww:history-open", (_e, savedPath) => {
+  if (typeof savedPath !== "string" || !savedPath) return { ok: false, error: "路径无效" };
+  if (!fs.existsSync(savedPath)) return { ok: false, error: "文件已被移动或删除" };
+  return shell.openPath(savedPath).then((r) => (r ? { ok: false, error: r } : { ok: true }));
+});
+
+/** 在资源管理器中显示文件 */
+ipcMain.handle("ww:history-reveal", (_e, savedPath) => {
+  if (typeof savedPath !== "string" || !savedPath) return { ok: false, error: "路径无效" };
+  if (!fs.existsSync(savedPath)) return { ok: false, error: "文件已被移动或删除" };
+  shell.showItemInFolder(savedPath);
+  return Promise.resolve({ ok: true });
+});
+
+/** 备份下载历史（弹保存框 → 整库复制） */
+ipcMain.handle("ww:history-backup", async () => {
+  if (!history) return HISTORY_DOWN;
+  const [win] = BrowserWindow.getAllWindows();
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const r = await dialog.showSaveDialog(win, {
+    title: "备份下载历史",
+    defaultPath: path.join(app.getPath("downloads"), `ww-history-${stamp}.db`),
+    filters: [{ name: "SQLite 数据库", extensions: ["db"] }],
+  });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  return history.backupTo(r.filePath);
+});
+
+/** 恢复下载历史（弹选择框 → 校验后整库替换） */
+ipcMain.handle("ww:history-restore", async () => {
+  if (!history) return HISTORY_DOWN;
+  const [win] = BrowserWindow.getAllWindows();
+  const r = await dialog.showOpenDialog(win, {
+    title: "恢复下载历史（将替换当前记录）",
+    properties: ["openFile"],
+    filters: [{ name: "SQLite 数据库", extensions: ["db"] }],
+  });
+  if (r.canceled || !r.filePaths?.[0]) return { ok: false, canceled: true };
+  const result = await history.restoreFrom(r.filePaths[0]);
+  if (result.ok) {
+    dialog
+      .showMessageBox(win, {
+        type: "info",
+        title: "恢复完成",
+        message: `下载历史已恢复（${result.count ?? "?"} 条记录）`,
+        detail: `来源：${r.filePaths[0]}`,
+        buttons: ["确定"],
+      })
+      .catch(() => {});
+  }
+  return result;
+});
+
+// 退出前强制把待写数据落盘（记录真源 + SQLite 历史）
+app.on("before-quit", () => {
+  flushStoreNow();
+  if (history) history.flush();
+});
+app.on("will-quit", () => {
+  flushStoreNow();
+  if (history) history.flush();
+});
 
 /* --------------------------- app:// 协议（核心） --------------------------- */
 
@@ -368,54 +484,6 @@ function persistWindowState(win) {
   } catch {
     /* 忽略：关闭时机竞争等 */
   }
-}
-
-/* ------------------------------ 下载接管 ------------------------------ */
-
-/** 下载会话：一批（单张或批量）进行中的计数 + 已存文件名，用于汇总通知 */
-const dl = { active: 0, batch: 0, savedNames: [] };
-
-function notifySaved() {
-  const n = dl.batch;
-  const dir = getSaveDir();
-  const title = n === 1 ? "壁纸已保存" : `已保存 ${n} 张壁纸`;
-  const names = dl.savedNames.slice(0, 3).join("、") + (dl.savedNames.length > 3 ? " 等" : "");
-  try {
-    if (Notification.isSupported()) {
-      const note = new Notification({ title, body: `${names}\n保存位置：${dir}`, timeoutType: "never" });
-      note.on("click", () => shell.openPath(dir));
-      note.show();
-    }
-  } catch {
-    /* 通知失败不影响下载 */
-  }
-}
-
-function installDownloadHandler() {
-  session.defaultSession.on("will-download", (_event, item) => {
-    const dir = getSaveDir();
-    const filename = item.getFilename() || `wallpaper-${Date.now()}.png`;
-    item.setSavePath(uniqueSavePath(dir, filename));
-    if (dl.active === 0) {
-      dl.batch = 0;
-      dl.savedNames = [];
-    }
-    dl.active += 1;
-    dl.batch += 1;
-    dl.savedNames.push(filename);
-    item.on("done", (_e, state) => {
-      dl.active -= 1;
-      if (state !== "completed" && dl.savedNames.includes(filename)) {
-        dl.savedNames = dl.savedNames.filter((f) => f !== filename);
-        dl.batch -= 1;
-      }
-      if (dl.active <= 0) {
-        dl.active = 0;
-        if (dl.batch > 0) notifySaved();
-        dl.batch = 0;
-      }
-    });
-  });
 }
 
 /* -------------------------------- 菜单 -------------------------------- */
@@ -733,9 +801,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
-    log("app ready：注册 app:// 协议与下载接管");
+    log("app ready：注册 app:// 协议");
     installAppProtocol();
-    installDownloadHandler();
     log("创建主窗口（app://local/index.html）");
     createWindow();
     app.on("activate", () => {

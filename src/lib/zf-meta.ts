@@ -32,6 +32,18 @@ export interface OfficialOriginalMeta {
   /** 官方声明的内容大小（字节，近似）；解析不出为 null */
   contentSizeBytes: number | null
   title: string | null
+  /** v2.0：官网 schema.org 类型（静态壁纸应为 "ImageObject"） */
+  schemaType: string | null
+  /** v2.0：官网描述明示「静态」/「动态」（无则 null） */
+  staticHint: "static" | "dynamic" | null
+}
+
+/** v2.0：官网元数据是否明确为静态图片（ImageObject 且描述非动态） */
+export function metaIsStaticImage(meta: OfficialOriginalMeta | null): boolean {
+  if (!meta) return false
+  if (meta.schemaType && meta.schemaType !== "ImageObject") return false
+  if (meta.staticHint === "dynamic") return false
+  return true
 }
 
 const metaCache = new Map<string, { ts: number; meta: OfficialOriginalMeta | null }>()
@@ -70,12 +82,17 @@ export function extractMetaFromDetailHtml(html: string): OfficialOriginalMeta | 
     const h = Number(obj.height)
     const cu = typeof obj.contentUrl === "string" ? obj.contentUrl : ""
     if (Number.isInteger(w) && w > 0 && Number.isInteger(h) && h > 0 && cu.includes("haowallpaper.com")) {
+      const nameAndDesc = `${typeof obj.name === "string" ? obj.name : ""} ${
+        typeof obj.description === "string" ? obj.description : ""
+      }`
       return {
         width: w,
         height: h,
         contentUrl: cu,
         contentSizeBytes: parseContentSizeBytes(obj.contentSize),
         title: typeof obj.name === "string" ? obj.name.slice(0, 120) : null,
+        schemaType: typeof obj["@type"] === "string" ? obj["@type"] : null,
+        staticHint: /动态/.test(nameAndDesc) ? "dynamic" : /静态/.test(nameAndDesc) ? "static" : null,
       }
     }
   }
@@ -89,6 +106,8 @@ export function extractMetaFromDetailHtml(html: string): OfficialOriginalMeta | 
       contentUrl: cu2[1],
       contentSizeBytes: null,
       title: null,
+      schemaType: null,
+      staticHint: null,
     }
   }
   return null

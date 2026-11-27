@@ -7,15 +7,28 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// 下载记录：下载过的壁纸自动隐藏（「隐藏已下载」开启时）
+/// 下载记录（v2.0 完整档案）：每条成功下载的原图记录
+/// 只有文件完整保存且质量校验通过后由 /api/wallpapers/download 写入
 model Download {
-  /// 壁纸文件 id（CDN 文件名去扩展名，唯一键）
+  /// 壁纸文件 id（CDN 文件名去扩展名 = 官网 wallpaperId，唯一键）
   id        String   @id
   title     String
   src       String
   wtId      String?
-  /// 下载质量：preview（预览直链约 1100px）| original（令牌换取的官网原图）
-  quality   String   @default("preview")
+  /// 下载质量：original（令牌换取的官网原图；v2.0 起只记录原图）
+  quality   String   @default("original")
+  /// v2.0：computer | phone | null（未知）
+  category  String?
+  /// v2.0：实际宽度（px，质量校验通过后回填）
+  width     Int?
+  /// v2.0：实际高度（px）
+  height    Int?
+  /// v2.0：真实格式（png/jpeg/webp，按字节魔数判定）
+  format    String?
+  /// v2.0：文件大小（字节）
+  bytes     Int?
+  /// v2.0：内容 SHA-256（完整校验凭证）
+  sha256    String?
   createdAt DateTime @default(now())
 }
 

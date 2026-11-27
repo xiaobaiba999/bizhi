@@ -1,34 +1,100 @@
 import { NextRequest, NextResponse } from "next/server"
+import { createHash } from "node:crypto"
 import { db } from "@/lib/db"
 import { isZhefengImageUrl } from "@/lib/zhefeng"
 import { zfCompleteUrl, zfUpstreamHeaders } from "@/lib/zf-login"
 import { ensureCertified, invalidateCertification } from "@/lib/zf-certify"
 import { createSemaphore } from "@/lib/semaphore"
 import { validateOriginalImage, type OriginalExpect } from "@/lib/image-quality"
-import { fetchOfficialOriginalMeta, type OfficialOriginalMeta } from "@/lib/zf-meta"
+import { fetchOfficialOriginalMeta, metaIsStaticImage, type OfficialOriginalMeta } from "@/lib/zf-meta"
 
 /**
- * GET /api/wallpapers/download?src=<img-url>&name=<title>&id=<file-id>&wtId=<详情id>
+ * GET /api/wallpapers/download?src=<img-url>&name=<title>&id=<file-id>&wtId=<详情id>&cat=<computer|phone>
  *
- * v1.4.14 原图完整性硬保证（对齐用户验收标准）：
- * - 只交付「与官网一致」的原图：官网详情页 JSON-LD 官方元数据（期望宽高/
- *   体积下限，不硬编码任何固定尺寸）→ 本地令牌 → ALTCHA 人机验证 →
- *   getCompleteUrl 签名直链 → 代理下载 → 字节级质量校验
- *   （src/lib/image-quality.ts）：期望宽高逐一硬比对（任一不符即拒：
- *   裁切/缩放/拉伸/改比例全拒）+ 魔数识别真实格式 + 体积下限。
- * - 禁止静默降级：无令牌 → 401 NEED_LOGIN（前端引导扫码，登录后自动续传）；
- *   令牌失效 → 401 + X-Auth-Expired；官网接口异常 → 502。任何情况下都不
- *   把 CDN 预览图（890px/25KB webp）当原图保存。
- * - 校验不过 → 502 DOWNLOAD_RESOLUTION_MISMATCH / DOWNLOAD_QUALITY_MISMATCH
- *   等（响应带 expected/actual），不写下载记录、不返回字节。
- * - 扩展名按字节真实格式（png/jpg/webp），杜绝 preview.webp 改名 .png。
- * - 链路全程原始字节直传（Buffer → Response），无任何 resize/crop/重编码。
+ * v2.0 OriginalDownloadService（服务器版，与桌面版 original-download.js 同构）：
+ *   本地记录检查（重复 409）→ 令牌检查（无 401）→ 官网元数据（期望宽高 +
+ *   动态壁纸拒绝）→ ALTCHA → getCompleteUrl 签名直链 → 原始字节 →
+ *   字节级质量硬校验（v1.4.13/14 防线全保留）→ 原始字节直传 → 写完整记录
+ *   （含 SHA-256/宽高/格式/大小/分类）。
+ *
+ * 统一错误码（v2.0 阶段七）：
+ * - 401 NEED_LOGIN / AUTH_EXPIRED：未登录 / 令牌失效
+ * - 409 DOWNLOAD_ALREADY：已下载过（msg 带原记录信息）
+ * - 429 DOWNLOAD_RESTRICTED / DOWNLOAD_RATE_LIMITED：官网风控 / 限流
+ *   （Retry-After 识别 + 恢复时间 90 天可信窗口，异常日期不回传具体时间）
+ * - 502 DOWNLOAD_DYNAMIC：动态壁纸（仅支持静态）
+ * - 502 DOWNLOAD_NOT_FOUND：原图不存在
+ * - 502 DOWNLOAD_RESOLUTION/FORMAT/SIZE/SHA/QUALITY_MISMATCH：质量防线拦截
  *
  * 成功响应头：X-Wallpaper-Quality: original + X-Image-Dimensions: WxH。
  */
 const dlSlots = createSemaphore(3, 8 * 60_000)
 
-/** 清洗文件名：去掉 Windows / macOS 非法字符 */
+/* ---------------- v2.0 阶段七：限流/恢复时间解析与防御 ---------------- */
+
+const RESTRICTED_RE = /受限|恢复时间|禁止下载|封禁|联系客服/
+/** 恢复时间可信窗口：超出视为「官网返回了异常日期」，不回传具体时间 */
+const RECOVER_SANITY_MS = 90 * 24 * 60 * 60 * 1000
+const RESTRICTED_PROBE_MS = 60_000
+const RATE_LIMIT_FALLBACK_MS = 60_000
+
+let restrictedUntil = 0
+let restrictedMsg = ""
+let restrictedProbeAt = 0
+let restrictedAbsurd = false
+
+/** 解析「恢复时间：YYYY-MM-DD HH:mm[:ss]」→ epoch ms（本地时区） */
+function parseRestrictedUntil(msg: string): number {
+  const m = msg.match(/(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/)
+  if (!m) return 0
+  const t = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6] || 0)
+  ).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
+/** Retry-After 解析（秒数或 HTTP 日期；异常值 → 0） */
+function parseRetryAfterMs(headerValue: string | null): number {
+  const v = String(headerValue ?? "").trim()
+  if (!v) return 0
+  if (/^\d+$/.test(v)) {
+    const ms = Number(v) * 1000
+    return ms > 0 && ms <= RECOVER_SANITY_MS ? ms : 0
+  }
+  const t = Date.parse(v)
+  const ms = Number.isFinite(t) ? t - Date.now() : 0
+  return ms > 0 && ms <= RECOVER_SANITY_MS ? ms : 0
+}
+
+function markRestricted(msg: string, fallbackMs = 10 * 60_000) {
+  restrictedMsg = msg
+  const until = parseRestrictedUntil(msg)
+  restrictedAbsurd = until > 0 && until - Date.now() > RECOVER_SANITY_MS
+  restrictedUntil = until > Date.now() ? until : Date.now() + fallbackMs
+  restrictedProbeAt = Date.now()
+  console.warn(
+    `[DOWNLOAD_RESTRICTED] 官网风控受限熔断至 ${new Date(restrictedUntil).toLocaleString()}：${msg}` +
+      (restrictedAbsurd ? "［恢复时间超出 90 天可信窗口，不回传具体日期］" : "")
+  )
+}
+
+function restrictedResponse() {
+  return NextResponse.json(
+    {
+      error: "DOWNLOAD_RESTRICTED",
+      msg: restrictedMsg || "官网下载功能暂时受限，请稍后重试",
+      ...(restrictedAbsurd ? { recoverUnknown: true } : { recoverAt: restrictedUntil }),
+    },
+    { status: 429 }
+  )
+}
+
+/** 清洗文件名 */
 function safeFilename(name: string): string {
   return (
     name
@@ -53,7 +119,6 @@ function digUrl(data: unknown, depth = 0): string | null {
   return digUrl(obj.data, depth + 1)
 }
 
-/** 官网 getCompleteUrl 的 JSON 响应（识别 3004/3005 业务错误码） */
 interface CompleteUrlResponse {
   status?: number | string
   msg?: string
@@ -61,10 +126,9 @@ interface CompleteUrlResponse {
 }
 
 /**
- * 调用官网 getCompleteUrl（已带 __media=1&__responseCodec=aeg-v2 必需参数）。
- * 前置条件：先通过 ALTCHA 人机验证（ensureCertified），并把验证会话的
- * server_session Cookie 回放到请求头 —— 官网验证状态绑定在该 Cookie 上。
- * 返回原图直链；令牌失效抛 "AUTH_EXPIRED"；其余异常抛普通 Error。
+ * 调用官网 getCompleteUrl（已带必需参数），前置 ALTCHA 验证。
+ * 抛出标记错误："AUTH_EXPIRED" / "__RESTRICTED__" / "__RATE_LIMITED__" /
+ * "__NOT_FOUND__"（404）；其余抛普通 Error。
  */
 async function fetchCompleteUrl(
   wtId: string,
@@ -79,9 +143,8 @@ async function fetchCompleteUrl(
     signal: AbortSignal.timeout(15000),
     cache: "no-store",
   })
-  if (res.status === 429) {
-    throw new Error("官网限流：操作太快了，请稍等几秒重试")
-  }
+  if (res.status === 429) throw new Error(`__RATE_LIMITED__:${res.headers.get("retry-after") ?? ""}`)
+  if (res.status === 404) throw new Error("__NOT_FOUND__")
   const json = (await res.json().catch(() => null)) as CompleteUrlResponse | null
   if (!json) throw new Error(`官网响应异常（HTTP ${res.status}）`)
 
@@ -90,14 +153,17 @@ async function fetchCompleteUrl(
 
   const status = Number(json.status ?? -1)
   const msg = typeof json.msg === "string" ? json.msg.trim() : ""
-  // 401 未授权：令牌确实失效（未登录 / 已过期），与 3004「错误的请求」不同
   if (status === 401 || /未授权/.test(msg)) {
     throw new Error("AUTH_EXPIRED")
   }
-  // 305 [错误的请求 -> 3004/3005]：人机验证缺失/过期 或 wtId 不对
   if (status === 305) {
     throw new Error(`CERTIFY_OR_PARAM_ERROR:${msg || status}`)
   }
+  if (RESTRICTED_RE.test(msg)) {
+    markRestricted(msg)
+    throw new Error("__RESTRICTED__")
+  }
+  if (status === 404) throw new Error("__NOT_FOUND__")
   throw new Error(msg || `官网接口异常（HTTP ${res.status}）`)
 }
 
@@ -105,18 +171,33 @@ export async function GET(req: NextRequest) {
   const src = req.nextUrl.searchParams.get("src") ?? ""
   const name = req.nextUrl.searchParams.get("name") ?? ""
   const id = req.nextUrl.searchParams.get("id") ?? ""
-  /** 壁纸详情 id（getCompleteUrl 用；缺省回退文件 id） */
   const wtId = req.nextUrl.searchParams.get("wtId") ?? ""
+  const cat = req.nextUrl.searchParams.get("cat") ?? ""
 
   if (!isZhefengImageUrl(src)) {
     return NextResponse.json({ error: "仅支持哲风壁纸图片直链" }, { status: 400 })
   }
 
   try {
-    // ① 占用回源槽位（最多 3 张并发，其余 FIFO 排队；排队超时抛 DOWNLOAD_QUEUE_TIMEOUT）
     await dlSlots.acquire()
 
     try {
+      // ① 本地下载记录检查：重复下载明确提示（不重复请求官网）
+      if (id) {
+        const existing = await db.download.findUnique({ where: { id } })
+        if (existing) {
+          return NextResponse.json(
+            {
+              error: "DOWNLOAD_ALREADY",
+              msg:
+                `「${existing.title || name}」已于 ${existing.createdAt.toLocaleString()} 下载过` +
+                (existing.width && existing.height ? `（${existing.width}×${existing.height}）` : ""),
+            },
+            { status: 409 }
+          )
+        }
+      }
+
       // ② 令牌检查：无令牌直接 401 引导登录（绝不回退 CDN 预览）
       const tokenRow = await db.zfToken.findFirst({ orderBy: { createdAt: "desc" } })
       if (!tokenRow) {
@@ -126,7 +207,37 @@ export async function GET(req: NextRequest) {
         )
       }
 
-      // ③ 官网人机验证 + getCompleteUrl 换签名直链（305 时重验一次）
+      // ②' 风控熔断：受限期内快速失败（零官网请求），探测窗口放行一次
+      if (restrictedUntil > Date.now()) {
+        if (Date.now() - restrictedProbeAt < RESTRICTED_PROBE_MS) return restrictedResponse()
+        restrictedProbeAt = Date.now()
+      }
+
+      // ③ 官网详情页元数据（期望宽高唯一权威来源 + 动态壁纸权威判定）
+      let meta: OfficialOriginalMeta | null = null
+      try {
+        meta = await fetchOfficialOriginalMeta(wtId || id)
+      } catch {
+        meta = null
+      }
+      if (meta && !metaIsStaticImage(meta)) {
+        return NextResponse.json(
+          {
+            error: "DOWNLOAD_DYNAMIC",
+            msg: "该内容是动态壁纸（官网元数据非静态图片），仅支持静态壁纸下载",
+          },
+          { status: 502 }
+        )
+      }
+      const expect: OriginalExpect | undefined = meta
+        ? {
+            width: meta.width,
+            height: meta.height,
+            ...(meta.contentSizeBytes ? { minBytes: Math.floor(meta.contentSizeBytes * 0.5) } : {}),
+          }
+        : undefined
+
+      // ④⑤ ALTCHA + getCompleteUrl 签名直链（305 时重验一次）
       let target: string
       try {
         let cookie = await ensureCertified()
@@ -134,7 +245,7 @@ export async function GET(req: NextRequest) {
           target = await fetchCompleteUrl(wtId || id, tokenRow.token, cookie)
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
-          if (msg === "AUTH_EXPIRED") throw e
+          if (msg === "AUTH_EXPIRED" || msg.startsWith("__")) throw e
           if (msg.startsWith("CERTIFY_OR_PARAM_ERROR")) {
             invalidateCertification()
             cookie = await ensureCertified(true)
@@ -146,52 +257,61 @@ export async function GET(req: NextRequest) {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (msg === "AUTH_EXPIRED") {
-          // 令牌确实失效：401 提示重新扫码（前端登录成功后自动续传）
           return NextResponse.json(
             { error: "AUTH_EXPIRED", msg: "登录令牌已失效，请重新扫码" },
             { status: 401, headers: { "X-Auth-Expired": "1" } }
           )
         }
+        if (msg === "__RESTRICTED__") return restrictedResponse()
+        if (msg.startsWith("__RATE_LIMITED__")) {
+          const retryMs = parseRetryAfterMs(msg.split(":")[1] ?? "")
+          if (restrictedUntil < Date.now()) markRestricted("官网限流（429）", retryMs || RATE_LIMIT_FALLBACK_MS)
+          return NextResponse.json(
+            {
+              error: "DOWNLOAD_RATE_LIMITED",
+              msg: restrictedMsg || "操作太快被官网限流，请稍后重试",
+              ...(restrictedAbsurd ? { recoverUnknown: true } : { recoverAt: restrictedUntil }),
+            },
+            { status: 429 }
+          )
+        }
+        if (msg === "__NOT_FOUND__") {
+          return NextResponse.json({ error: "DOWNLOAD_NOT_FOUND", msg: "原图资源不存在（404）" }, { status: 502 })
+        }
         console.error("getCompleteUrl error:", e)
         return NextResponse.json({ error: msg || "原图获取失败，请稍后重试" }, { status: 502 })
       }
 
-      // ④ 官网详情页 JSON-LD 官方元数据（期望宽高的唯一权威来源；非致命
-      //    —— 取不到时退回 v1.4.13 预览兜底闸门，绝不因元数据抖动阻断下载）
-      let meta: OfficialOriginalMeta | null = null
-      try {
-        meta = await fetchOfficialOriginalMeta(wtId || id)
-      } catch {
-        meta = null
-      }
-      const expect: OriginalExpect | undefined = meta
-        ? {
-            width: meta.width,
-            height: meta.height,
-            // 体积下限：官方 contentSize 的 50%（辅助线，仅拦「同尺寸重压缩缩水」）
-            ...(meta.contentSizeBytes ? { minBytes: Math.floor(meta.contentSizeBytes * 0.5) } : {}),
-          }
-        : undefined
-
-      // ⑤ 回源下载原图：整段读入内存（拿到完整字节即释放槽位）
+      // ⑥ 下载原图字节（整段读入内存）
       const upstream = await fetch(target, {
         headers: zfUpstreamHeaders({ token: tokenRow.token }),
         signal: AbortSignal.timeout(120000),
         cache: "no-store",
       })
-      if (!upstream.ok) {
+      if (upstream.status === 429) {
+        const retryMs = parseRetryAfterMs(upstream.headers.get("retry-after"))
+        markRestricted("官网限流（429）", retryMs || RATE_LIMIT_FALLBACK_MS)
         return NextResponse.json(
-          { error: `原图下载失败（HTTP ${upstream.status}）` },
-          { status: 502 }
+          {
+            error: "DOWNLOAD_RATE_LIMITED",
+            msg: restrictedMsg,
+            ...(restrictedAbsurd ? { recoverUnknown: true } : { recoverAt: restrictedUntil }),
+          },
+          { status: 429 }
         )
+      }
+      if (upstream.status === 404) {
+        return NextResponse.json({ error: "DOWNLOAD_NOT_FOUND", msg: "原图文件不存在（404）" }, { status: 502 })
+      }
+      if (!upstream.ok) {
+        return NextResponse.json({ error: `原图下载失败（HTTP ${upstream.status}）` }, { status: 502 })
       }
       const buffer = Buffer.from(await upstream.arrayBuffer())
       if (buffer.length === 0) {
-        return NextResponse.json({ error: "原图内容为空" }, { status: 502 })
+        return NextResponse.json({ error: "原图内容为空（连接被中断）" }, { status: 502 })
       }
 
-      // ⑥ 质量硬闸门：期望宽高逐一硬比对 + 字节级校验，预览图/裁切/缩放/
-      //    改比例/重压缩一律拒绝交付
+      // ⑦ 质量硬闸门：期望宽高逐一硬比对 + 字节级校验
       const check = validateOriginalImage(buffer, expect)
       if (!check.ok) {
         console.error(
@@ -210,7 +330,7 @@ export async function GET(req: NextRequest) {
         )
       }
 
-      // ⑦ 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
+      // ⑧ 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
       const filename = `${safeFilename(name)}.${check.ext}`
       const contentTypeByFormat: Record<string, string> = {
         png: "image/png",
@@ -223,13 +343,33 @@ export async function GET(req: NextRequest) {
         (upstream.headers.get("content-type") ?? "").split(";")[0].trim() ??
         "application/octet-stream"
 
-      // ⑧ 全部通过才写下载记录（键 = 文件 id，与列表过滤一致）
+      // ⑨ 写完整下载记录（只有走到这里 = 校验通过 + 字节完整）
       if (id) {
         try {
           await db.download.upsert({
             where: { id },
-            create: { id, title: safeFilename(name), src, wtId: wtId || null, quality: "original" },
-            update: { quality: "original", wtId: wtId || undefined },
+            create: {
+              id,
+              title: safeFilename(name),
+              src,
+              wtId: wtId || null,
+              quality: "original",
+              category: cat === "computer" || cat === "phone" ? cat : null,
+              width: check.width,
+              height: check.height,
+              format: check.format,
+              bytes: check.bytes,
+              sha256: createHash("sha256").update(buffer).digest("hex"),
+            },
+            update: {
+              quality: "original",
+              category: cat === "computer" || cat === "phone" ? cat : undefined,
+              width: check.width,
+              height: check.height,
+              format: check.format,
+              bytes: check.bytes,
+              sha256: createHash("sha256").update(buffer).digest("hex"),
+            },
           })
         } catch (e) {
           console.error("record download error:", e)
@@ -248,18 +388,13 @@ export async function GET(req: NextRequest) {
 
       return new NextResponse(new Uint8Array(buffer), { status: 200, headers })
     } finally {
-      // 释放槽位：下一张排队中的下载立即开始
       dlSlots.release()
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    // 排队超时（罕见：前一批占满 8 分钟）：给出可重试的明确提示
     if (msg.startsWith("DOWNLOAD_QUEUE_TIMEOUT")) {
       const secs = msg.split(":")[1] ?? "?"
-      return NextResponse.json(
-        { error: `下载排队超过 ${secs} 秒，请稍后重试` },
-        { status: 503 }
-      )
+      return NextResponse.json({ error: `下载排队超过 ${secs} 秒，请稍后重试` }, { status: 503 })
     }
     console.error("GET /api/wallpapers/download error:", e)
     return NextResponse.json({ error: "原图下载失败，请稍后重试" }, { status: 502 })

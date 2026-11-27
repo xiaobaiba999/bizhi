@@ -24,17 +24,8 @@ import {
   PAGE_SIZE,
   type ZhefengWallpaper,
 } from "@/lib/zhefeng"
-import {
-  getLocalDownloadIds,
-  clearLocalDownloads,
-  countLocalDownloads,
-} from "@/lib/download-store"
-import {
-  getLocalBlockedIds,
-  recordLocalBlock,
-  clearLocalBlocked,
-  countLocalBlocked,
-} from "@/lib/block-store"
+import { getDownloadIdSet, getDownloadedCount } from "@/lib/download-store"
+import { getLocalBlockedIds, countLocalBlocked } from "@/lib/block-store"
 
 /** 静态导出构建标记（next.config env 注入；客户端包构建期固化） */
 export const IS_STATIC_EXPORT = process.env.NEXT_PUBLIC_STATIC_EXPORT === "1"
@@ -110,9 +101,10 @@ export async function loadWallpaperPage(
 
   // —— static：浏览器直连源站抓取 + 本地记录过滤（与 API 逻辑对齐） ——
   const cat = findCategory(catKey)
-  const downloaded = getLocalDownloadIds()
   const blocked = getLocalBlockedIds()
-  const downloadedCount = countLocalDownloads()
+  // v2.0：桌面版下载记录在主进程 SQLite（真实记录），异步读取
+  const downloaded = await getDownloadIdSet()
+  const downloadedCount = await getDownloadedCount()
   const blockedCount = countLocalBlocked()
 
   if (!hideDownloaded) {
@@ -191,52 +183,12 @@ export async function fetchSiteFirstPage(
   // —— static：浏览器直连源站第 1 页 + 本地记录过滤 ——
   const cat = findCategory(catKey)
   const blocked = getLocalBlockedIds()
-  const downloaded = getLocalDownloadIds()
+  const downloaded = await getDownloadIdSet()
   const batch = await fetchPageWithRetry(cat, 1, true)
   return batch.filter((w) => !blocked.has(w.id) && (!hideDownloaded || !downloaded.has(w.id)))
 }
 
 /* ------------------------------ 记录操作（双模式） ------------------------------ */
-
-/** 清空下载记录（被隐藏的壁纸恢复显示） */
-export async function clearAllDownloads(): Promise<void> {
-  if (IS_STATIC_EXPORT) {
-    clearLocalDownloads()
-    return
-  }
-  const res = await fetch("/api/wallpapers/downloads", { method: "DELETE" })
-  if (!res.ok) throw new Error("清空失败")
-}
-
-/**
- * 屏蔽一张壁纸（永久不再显示）。
- * 返回屏蔽总数（两种模式都会写自己的主存储；服务器模式失败由调用方回滚 UI）。
- */
-export async function blockWallpaper(w: ZhefengWallpaper): Promise<number> {
-  if (IS_STATIC_EXPORT) {
-    return recordLocalBlock({ id: w.id, title: w.title, src: w.src })
-  }
-  const res = await fetch("/api/wallpapers/block", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: w.id, src: w.src, title: w.title, wtId: w.wtId || w.id }),
-  })
-  if (!res.ok) throw new Error("屏蔽失败")
-  const data = (await res.json().catch(() => ({}))) as { blockedCount?: number }
-  return typeof data.blockedCount === "number" ? data.blockedCount : 0
-}
-
-/** 清空屏蔽记录（被屏蔽的壁纸恢复显示）。返回清空后的屏蔽总数（0）。 */
-export async function clearAllBlocked(): Promise<number> {
-  if (IS_STATIC_EXPORT) {
-    clearLocalBlocked()
-    return 0
-  }
-  const res = await fetch("/api/wallpapers/block", { method: "DELETE" })
-  if (!res.ok) throw new Error("清空屏蔽记录失败")
-  const data = (await res.json().catch(() => ({}))) as { blockedCount?: number }
-  return typeof data.blockedCount === "number" ? data.blockedCount : 0
-}
 
 /* ------------------------- 静态模式下载辅助 ------------------------- */
 

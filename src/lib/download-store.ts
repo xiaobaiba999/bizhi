@@ -1,35 +1,36 @@
 /**
- * 壁纸工坊 · 下载记录本地存储
- *
- * 双模式（v1.4.8）：
- * - 桌面版（Electron）：文件真源 userData/ww-store.json（升级换版不丢），
- *   localStorage 降级为镜像；首次运行自动迁移 v1.4.7 旧记录；
- * - 网页版（GitHub Pages）：localStorage 主存储（原行为不变），
- *   「隐藏已下载」过滤与「清空记录」都直接操作这一份。
+ * 壁纸工坊 · 下载记录访问层（v2.0）
+ * ============================================================
+ * 三模式职责（v2.0 单写者原则）：
+ * - 桌面版（Electron）：下载历史由主进程 SQLite（userData/ww-history.db）
+ *   唯一写入（OriginalDownloadService 在文件落盘+校验通过后写入），
+ *   渲染层通过 preload 桥只读（ids / count / list）；
+ * - 服务器版：下载记录由 /api/wallpapers/download 成功后写 Prisma SQLite，
+ *   列表过滤服务端完成，渲染层只读计数；
+ * - Pages 在线版：无法下载原图（只引导桌面版），本地仅保留旧版
+ *   localStorage 镜像用于兼容展示，不再写入。
  */
 
-import { desktopBridge, desktopRead, desktopWrite } from "@/lib/desktop-store"
+import { desktopBridge, type DownloadHistoryRecord } from "@/lib/desktop-store"
 
-const KEY = "ww-downloads-v1"
+const LEGACY_KEY = "ww-downloads-v1"
 
-export interface DownloadRecord {
-  /** 壁纸文件 id（与源站 CDN 文件名去扩展名一致，作唯一键） */
+/** 旧版（v1.x）记录形状：仅用于 Pages 兼容展示 */
+interface LegacyDownloadRecord {
   id: string
   title: string
   src: string
   downloadedAt: number
 }
 
-function read(): DownloadRecord[] {
-  // 桌面版：文件真源（内存镜像，由 desktop-store 统一懒加载/迁移）
-  if (desktopBridge) return (desktopRead("downloads") as DownloadRecord[]) ?? []
+function readLegacy(): LegacyDownloadRecord[] {
   try {
-    const raw = localStorage.getItem(KEY)
+    const raw = localStorage.getItem(LEGACY_KEY)
     if (!raw) return []
     const arr = JSON.parse(raw)
     if (!Array.isArray(arr)) return []
     return arr.filter(
-      (i): i is DownloadRecord =>
+      (i): i is LegacyDownloadRecord =>
         i && typeof i.id === "string" && typeof i.title === "string" && typeof i.src === "string"
     )
   } catch {
@@ -37,57 +38,73 @@ function read(): DownloadRecord[] {
   }
 }
 
-function write(items: DownloadRecord[]) {
-  const trimmed = items.slice(-5000)
+/**
+ * 已下载的壁纸 id 集合。
+ * - 桌面版：主进程 SQLite（真实下载记录，「隐藏已下载」的判定源）
+ * - 其他模式：旧版 localStorage 镜像（兼容展示）
+ */
+export async function getDownloadIdSet(): Promise<Set<string>> {
   if (desktopBridge) {
-    // 文件真源 + localStorage 镜像（desktopWrite 内部双写）
-    desktopWrite("downloads", trimmed)
-    return
-  }
-  try {
-    localStorage.setItem(KEY, JSON.stringify(trimmed))
-  } catch {
-    // 存储满等异常：忽略（过滤功能退化为当次会话，不影响下载本身）
-  }
-}
-
-/** 全部下载记录（新→旧） */
-export function listLocalDownloads(): DownloadRecord[] {
-  return read()
-}
-
-/** 已下载的壁纸 id 集合（过滤用） */
-export function getLocalDownloadIds(): Set<string> {
-  return new Set(read().map((i) => i.id))
-}
-
-/** 记录一次下载（已存在则刷新时间） */
-export function recordLocalDownload(w: { id: string; title: string; src: string }) {
-  if (!w.id) return
-  const items = read().filter((i) => i.id !== w.id)
-  items.push({ id: w.id, title: w.title, src: w.src, downloadedAt: Date.now() })
-  write(items)
-}
-
-/** 清空全部下载记录（被隐藏的壁纸恢复显示） */
-export function clearLocalDownloads() {
-  if (desktopBridge) {
-    desktopWrite("downloads", []) // 文件真源同步清空
     try {
-      localStorage.removeItem(KEY)
+      return await desktopBridge.historyIds()
     } catch {
-      // 忽略
+      return new Set()
     }
-    return
   }
-  try {
-    localStorage.removeItem(KEY)
-  } catch {
-    // 忽略
-  }
+  return new Set(readLegacy().map((i) => i.id))
 }
 
-/** 记录条数 */
-export function countLocalDownloads(): number {
-  return read().length
+/** 下载记录条数 */
+export async function getDownloadedCount(): Promise<number> {
+  if (desktopBridge) {
+    try {
+      return await desktopBridge.historyCount()
+    } catch {
+      return 0
+    }
+  }
+  return readLegacy().length
+}
+
+/**
+ * 下载历史列表（下载历史视图用）。
+ * - 桌面版：SQLite 完整记录（含宽高/格式/大小/SHA-256/路径/文件存在检测）
+ * - 服务器版：由调用方走 /api/wallpapers/downloads（Prisma）
+ * - Pages 版：旧版记录映射（字段缺失按 null）
+ */
+export async function listLocalDownloadRecords(): Promise<DownloadHistoryRecord[]> {
+  if (desktopBridge) {
+    try {
+      return await desktopBridge.historyList()
+    } catch {
+      return []
+    }
+  }
+  return readLegacy()
+    .slice()
+    .reverse()
+    .map((i) => ({
+      id: i.id,
+      wtId: null,
+      title: i.title,
+      category: null,
+      width: null,
+      height: null,
+      format: null,
+      bytes: null,
+      sha256: null,
+      savedPath: null,
+      downloadedAt: i.downloadedAt,
+      fileExists: null,
+    }))
+}
+
+/**
+ * 记录一次下载 —— v2.0 起为兼容空操作：
+ * 桌面版由主进程 OriginalDownloadService 写 SQLite（单写者），
+ * 服务器版由 /api 路由写 Prisma，Pages 版无法下载。保留此函数仅为
+ * 兼容旧调用点，避免双写。
+ */
+export function recordLocalDownload(_w: { id: string; title: string; src: string }): void {
+  /* v2.0：单写者原则，渲染层不再写下载记录 */
 }

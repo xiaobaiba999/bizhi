@@ -47,19 +47,31 @@ export interface DesktopBridge {
   /** 官网实测令牌是否仍有效（true / false / null 无法判定） */
   loginVerify(wtId: string): Promise<{ valid: boolean | null; msg?: string }>
   /**
-   * 原图直存（v1.4.14 完整性硬校验）：主进程先取官网详情页 JSON-LD 官方
-   * 元数据（期望宽高，不硬编码固定尺寸）→ ALTCHA 人机验证 → getCompleteUrl
-   * 换官网原图直链 → 下载字节经字节级质量校验（期望宽高逐一硬比对，任一
-   * 不符即拒：裁切/缩放/拉伸/改比例全拒；预览图/未知格式一律拒绝保存）
-   * 后直接写入壁纸保存目录。ok=false 时绝不落盘：无令牌 / 令牌失效 /
-   * 质量不达标 / 官网异常，渲染层按 reason 引导扫码或提示重试。
+   * 原图下载（v2.0 OriginalDownloadService 统一链路）：主进程 本地记录检查 →
+   * 登录检查 → 官网元数据（动态壁纸拒绝）→ ALTCHA → getCompleteUrl 签名直链
+   * → 原始字节 → 质量硬校验（期望宽高逐一硬比对，不达标绝不落盘）→ 直存
+   * → 写 SQLite 历史。ok=false 时绝不落盘。重复下载返回 already-downloaded。
+   * @param wp { id, wtId?, title, category? } 统一壁纸模型
    */
-  downloadOriginal(wtId: string, filename: string, previewSrc: string): Promise<{
+  downloadOriginal(wp: {
+    id: string
+    wtId?: string
+    title: string
+    category?: "computer" | "phone" | null
+  }): Promise<{
     ok: boolean
-    quality: "original" | "preview"
     reason?:
       | "no-token"
       | "auth-expired"
+      | "already-downloaded"
+      | "dynamic"
+      | "restricted"
+      | "rate-limited"
+      | "not-found"
+      | "no-permission"
+      | "server-error"
+      | "network"
+      | "interrupted"
       | "error"
       | "quality-mismatch"
       | "resolution-mismatch"
@@ -75,12 +87,56 @@ export interface DesktopBridge {
     aspectRatio?: number
     format?: string
     bytes?: number
+    /** 下载内容的 SHA-256（成功时回传） */
+    sha256?: string
     /** true = 本次经过了官方元数据期望宽高的硬校验 */
     metaVerified?: boolean
+    /** 官网风控/限流预计恢复时间（epoch ms；0/缺省 = 未知，不展示具体日期） */
+    recoverAt?: number
+    /** true = 官网返回了异常日期，恢复时间不可信（界面不展示具体日期） */
+    recoverUnknown?: boolean
+    /** 已下载记录（already-downloaded 时回传） */
+    record?: DownloadHistoryRecord
     msg?: string
   }>
   /** 菜单「微信扫码登录…」点击：通知渲染层打开登录弹窗 */
   onOpenLogin(callback: () => void): void
+
+  /* ---------------- 下载历史（v2.0 SQLite，主进程托管） ---------------- */
+
+  /** 历史记录列表（新→旧；含文件存在检测；filter.category 可选） */
+  historyList(filter?: { category?: "computer" | "phone" }): Promise<DownloadHistoryRecord[]>
+  /** 全部已下载 id 集合（「隐藏已下载」过滤用） */
+  historyIds(): Promise<Set<string>>
+  /** 历史记录条数 */
+  historyCount(): Promise<number>
+  /** 用系统默认看图工具打开本地文件 */
+  historyOpenFile(savedPath: string): Promise<{ ok: boolean; error?: string }>
+  /** 在资源管理器中显示文件 */
+  historyRevealFile(savedPath: string): Promise<{ ok: boolean; error?: string }>
+  /** 备份下载历史（弹保存框 → 整库 .db 复制） */
+  historyBackup(): Promise<{ ok: boolean; canceled?: boolean; error?: string }>
+  /** 恢复下载历史（弹选择框 → 校验后整库替换） */
+  historyRestore(): Promise<{ ok: boolean; canceled?: boolean; error?: string; count?: number }>
+}
+
+/** 下载历史记录（与主进程 SQLite downloads 表一致） */
+export interface DownloadHistoryRecord {
+  /** 官网 wallpaperId（文件 id，唯一） */
+  id: string
+  wtId: string | null
+  title: string
+  /** computer | phone | null（旧版迁移记录无分类） */
+  category: "computer" | "phone" | null
+  width: number | null
+  height: number | null
+  format: string | null
+  bytes: number | null
+  sha256: string | null
+  savedPath: string | null
+  downloadedAt: number
+  /** 读时检测：true 存在 / false 已被手动删除 / null 路径未知 */
+  fileExists: boolean | null
 }
 
 declare global {

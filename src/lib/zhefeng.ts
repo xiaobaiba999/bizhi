@@ -20,15 +20,44 @@ export interface ZhefengWallpaper {
   wtId: string
   /** 清洗后的标题（去掉「哲风壁纸」后缀） */
   title: string
-  /** 分辨率标识：4K / 7K / 2K … */
+  /** 分辨率标识：4K / 7K / 2K …（官网 alt 文本，有可靠数据时展示） */
   resolution: string
-  /** 原图直链（PNG 等，最大分辨率） */
+  /** 原图直链（PNG 等，最大分辨率；仅授权登录后用于下载，未登录 CDN 只回预览） */
   src: string
   /** 网格缩略图（s320 webp） */
   thumb: string
   /** 标签 */
   tags: string[]
+  /** v2.0 统一分类：来自官网 wpType（1=电脑横屏 2=手机竖屏），官网权威元数据 */
+  category: "computer" | "phone"
+  /** v2.0 动态壁纸标记：官网视频卡片 / 动态媒体格式 → 已在入口过滤，不会出现在列表 */
+  isDynamic: boolean
+  /** 官网声明的原图宽（列表级拿不到，下载期从详情页 JSON-LD 填充） */
+  width?: number
+  /** 官网声明的原图高 */
+  height?: number
+  /** 真实格式（png/jpeg/webp…，下载期按字节魔数判定） */
+  format?: string
+  /** 官网 contentSize 字节数（下载期从详情页元数据填充） */
+  originalSize?: number
 }
+
+/** v2.0 统一壁纸数据模型（规格别名；字段语义见上） */
+export type Wallpaper = ZhefengWallpaper
+
+/** 分类归一：官网 wpType → v2.0 分类 */
+export function categoryOfWpType(wpType: 1 | 2): "computer" | "phone" {
+  return wpType === 2 ? "phone" : "computer"
+}
+
+/**
+ * v2.0 动态/不确定媒体扩展名：官网存在动态壁纸（卡片容器 img-or-video）。
+ * 处置邨1：视频卡片（chunk 内含 <video）直接过滤；
+ * 处置邨2：gif/mp4/webm 等动态或不确定格式——不简单等同动态，但按规格
+ * 「不能确定类型时默认不进入静态列表」排除（当前官网列表实采 8 页均为
+ * png，零误伤）。静态判定最终权威 = 详情页 JSON-LD @type=ImageObject。
+ */
+const NON_STATIC_EXTS = new Set(["gif", "mp4", "webm", "mov", "avi", "mkv", "m4v"])
 
 export interface ZhefengCategory {
   key: string
@@ -120,6 +149,13 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
 
     const dot = src.lastIndexOf(".")
     if (dot === -1) continue
+    // v2.0 动态壁纸过滤①：视频卡片（官网卡片容器为 img-or-video，
+    // 视频卡片含 <video> 元素，可能带 <img> 海报图）一律不进列表
+    if (/<video[\s>]/i.test(chunk)) continue
+    const ext = src.slice(dot + 1).toLowerCase()
+    // v2.0 动态壁纸过滤②：动态或不确定格式默认排除（避免误显示动态壁纸；
+    // 当前官网列表实采均为 png，不影响存量内容）
+    if (NON_STATIC_EXTS.has(ext)) continue
     const id = src.slice(src.lastIndexOf("/") + 1, dot)
     if (seen.has(id)) continue
     seen.add(id)
@@ -161,6 +197,8 @@ function parseWallpapers(html: string): ZhefengWallpaper[] {
       src,
       thumb,
       tags,
+      category: "computer", // 占位：fetchWallpapers 按分类权威标注
+      isDynamic: false, // 能走到这里 = 静态 <img> 卡片且非动态格式
     })
   }
   return items
@@ -220,7 +258,12 @@ export async function fetchWallpapers(
   if (!res.ok) throw new Error(`源站响应异常（HTTP ${res.status}）`)
 
   const html = await res.text()
-  const items = parseWallpapers(html)
+  const items = parseWallpapers(html).map((w) => ({
+    ...w,
+    // 分类权威来源：官网 wpType（1=电脑横屏 2=手机竖屏）；
+    // 列表级无逐张宽高，无法也不需要尺寸辅助分类
+    category: categoryOfWpType(cat.wpType),
+  }))
   cache.set(key, { ts: Date.now(), items })
   return items
 }
