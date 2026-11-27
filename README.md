@@ -2,13 +2,13 @@
 
 本仓库是「壁纸工坊」的纯静态网页版，由部署脚本自动推送，站点地址：
 
-**https://xiaobaiba999.github.io/bizhi**
+**https://xiaobaiba999.github.io/**
 
 ## Windows 桌面版（v1.4.7 新增）
 
 除本网页版外，还提供 **Windows 桌面安装版**（Electron，Win10/11 x64）：
 见 **[Releases](https://github.com/xiaobaiba999/bizhi/releases/latest)** 下载
-`WallpaperWorkshop-Setup-v1.4.13.exe`（约 97MB）—— 向导式安装，
+`WallpaperWorkshop-Setup-v2.0.0.exe`（约 97MB）—— 向导式安装，
 壁纸自动保存到「图片 / WallpaperWorkshop」并弹系统通知，记录独立持久。
 
 ## 网页版功能
@@ -27,15 +27,15 @@
 
 见仓库 **[Releases](https://github.com/xiaobaiba999/bizhi/releases)**：
 
-- `WallpaperWorkshop-Web-v1.4.13.zip`（约 0.5MB）—— 本静态网页版的离线压缩包，
+- `WallpaperWorkshop-Web-v2.0.0.zip`（约 0.5MB）—— 本静态网页版的离线压缩包，
   解压后**双击 index.html 即可用**（无需服务器；壁纸加载需联网）
 
 ## 仓库结构
 
 - `main` 分支：即本静态站点（`index.html` / `_next/` 等），
-  由项目源码执行 `node scripts/build-gh-pages.mjs /bizhi` 构建产出，
+  由项目源码执行 `node scripts/build-gh-pages.mjs ` 构建产出，
   再通过 GitHub REST API 一键推送（见源码项目 `scripts/deploy-to-github.mjs`）
 - `source` 分支：完整项目源码快照（Next.js 16 + Prisma + Tailwind 4 +
   Electron 桌面版），由 `node scripts/push-source-to-github.mjs` 推送
 
-> 本站以 `/bizhi` 子路径托管构建，请勿改名或移动文件，否则资源路径会失效。
+> 本站以 `/` 子路径托管构建，请勿改名或移动文件，否则资源路径会失效。
