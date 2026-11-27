@@ -269,6 +269,7 @@ try {
     writeSettings,
     getSaveDir,
     uniqueSavePath,
+    log, // v1.4.14：质量闸门决策写运行日志（审计轨迹）
   });
 } catch (e) {
   login = null;

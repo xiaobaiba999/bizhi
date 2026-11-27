@@ -7,8 +7,11 @@
  * 背景（实测取证见 scripts/original-download-quality-test.mjs）：
  * 官网 CDN 对未登录请求一律返回 890px webp 预览（无论 URL 是否 .png），
  * previewFileImg 官方预览 1100px；原图仅登录令牌 + getCompleteUrl 可得。
- * 本模块用字节级解析回答「这段字节是不是官网原图」。
+ * v1.4.14：新增 expect 硬校验（官网详情页 JSON-LD 官方宽高/格式/SHA-256/
+ * 体积下限），宽或高任一不符即拒绝 —— 覆盖裁切/缩放/拉伸/改比例。
  */
+
+import { createHash } from "node:crypto"
 
 /** 官方预览的宽度上限（previewFileImg 实测 1100px；CDN 直链预览 890px） */
 export const PREVIEW_LONG_SIDE_MAX = 1100
@@ -23,16 +26,42 @@ export interface ParsedImageInfo {
   height: number
 }
 
+/** 期望值：来自官网详情页 JSON-LD 官方元数据（或金基准样本） */
+export interface OriginalExpect {
+  /** 官方原图宽度（硬性指标，任一不符即拒绝） */
+  width?: number
+  /** 官方原图高度（硬性指标，任一不符即拒绝） */
+  height?: number
+  /** 官方原图格式（png/jpeg/webp/gif；杜绝伪装） */
+  format?: string
+  /** 官方原图完整字节 SHA-256（字节级一致性证明） */
+  sha256?: string
+  /** 体积下限（官方 contentSize 保守折扣；辅助线，宽高+格式才是硬指标） */
+  minBytes?: number
+}
+
+export type ImageValidationCode =
+  | "FORMAT_UNKNOWN"
+  | "DOWNLOAD_QUALITY_MISMATCH"
+  | "DOWNLOAD_RESOLUTION_MISMATCH"
+  | "DOWNLOAD_FORMAT_MISMATCH"
+  | "DOWNLOAD_SHA256_MISMATCH"
+  | "DOWNLOAD_SIZE_MISMATCH"
+
 export interface ImageValidation {
   ok: boolean
-  code?: "FORMAT_UNKNOWN" | "DOWNLOAD_QUALITY_MISMATCH"
+  code?: ImageValidationCode
   msg?: string
   format?: string
   width?: number
   height?: number
   longSide?: number
+  aspectRatio?: number
   ext?: string
   bytes?: number
+  sha256?: string
+  expectedWidth?: number
+  expectedHeight?: number
 }
 
 /** 解析图片字节 → { format, width, height }；无法识别返回 null（只读头部） */
@@ -93,6 +122,7 @@ export function parseImageInfo(buf: Buffer): ParsedImageInfo | null {
       return null
     }
     if (fourCC === "VP8L" && buf.length >= 21 && buf[20] === 0x2f) {
+      // VP8L（无损）：签名 0x2F 后 4 字节位流：宽-1 低 14 位、高-1 次 14 位
       const bits = buf.readUInt32LE(21)
       return {
         format: "webp",
@@ -122,8 +152,14 @@ export function extOfFormat(format: string): string {
   }
 }
 
-/** 原图质量校验：ok 之外的一切结果都意味着「绝不允许保存」 */
-export function validateOriginalImage(buf: Buffer): ImageValidation {
+/** 宽高比（保留 6 位小数；宽高为 0 时返回 null） */
+export function aspectRatioOf(width: number, height: number): number | null {
+  if (!width || !height) return null
+  return Math.round((width / height) * 1e6) / 1e6
+}
+
+/** 原图质量校验（v1.4.14 完整性版）：ok 之外的一切结果都意味着「绝不允许保存」 */
+export function validateOriginalImage(buf: Buffer, expect?: OriginalExpect): ImageValidation {
   const bytes = Buffer.isBuffer(buf) ? buf.length : 0
   const info = parseImageInfo(buf)
   if (!info || !info.width || !info.height || info.width > 100000 || info.height > 100000) {
@@ -135,24 +171,98 @@ export function validateOriginalImage(buf: Buffer): ImageValidation {
     }
   }
   const longSide = Math.max(info.width, info.height)
-  const base = { ...info, longSide, ext: extOfFormat(info.format), bytes }
+  const ar = aspectRatioOf(info.width, info.height)
+  const base = { ...info, longSide, aspectRatio: ar, ext: extOfFormat(info.format), bytes }
 
-  if (longSide <= PREVIEW_LONG_SIDE_MAX) {
-    return {
-      ...base,
-      ok: false,
-      code: "DOWNLOAD_QUALITY_MISMATCH",
-      msg:
-        `官网返回的是预览图而非原图（${info.width}×${info.height}，${(bytes / 1024).toFixed(0)}KB` +
-        `，官方预览上限 ${PREVIEW_LONG_SIDE_MAX}px），已拒绝保存`,
+  const exp = expect ?? {}
+  const expW = Number(exp.width) > 0 ? Number(exp.width) : null
+  const expH = Number(exp.height) > 0 ? Number(exp.height) : null
+
+  // ① 期望宽高硬校验（官方元数据为权威，逐一完全一致才放行；
+  //    宽或高任一不符即拒绝 —— 覆盖裁切/缩放/拉伸/改比例全部场景）
+  if (expW !== null || expH !== null) {
+    const badW = expW !== null && info.width !== expW
+    const badH = expH !== null && info.height !== expH
+    if (badW || badH) {
+      const expAr = aspectRatioOf(expW ?? info.width, expH ?? info.height)
+      const arNote =
+        expAr !== null && ar !== null && expAr !== ar
+          ? `，宽高比也不一致（官网 ${expAr} / 实际 ${ar}）`
+          : ""
+      return {
+        ...base,
+        ok: false,
+        code: "DOWNLOAD_RESOLUTION_MISMATCH",
+        expectedWidth: expW ?? undefined,
+        expectedHeight: expH ?? undefined,
+        msg:
+          `分辨率与官网原图不符：官网 ${expW ?? "?"}×${expH ?? "?"}，实际 ` +
+          `${info.width}×${info.height}${arNote}，已拒绝保存（可能是缩放/裁切版本）`,
+      }
     }
   }
-  if (bytes < SUSPICIOUS_SMALL_BYTES && longSide < LOW_RES_LONG_SIDE) {
+  // 期望宽高全部给出且完全匹配 → 尺寸已由官方元数据证明，跳过预览兜底线
+  const dimsVerified = expW !== null && expH !== null
+
+  // ② 期望格式硬校验（杜绝 WebP/JPEG 内容伪装成 PNG 原图）
+  if (typeof exp.format === "string" && exp.format) {
+    const want = exp.format === "jpg" ? "jpeg" : exp.format
+    if (info.format !== want) {
+      return {
+        ...base,
+        ok: false,
+        code: "DOWNLOAD_FORMAT_MISMATCH",
+        msg: `图片格式与官网原图不符：官网 ${want}，实际 ${info.format}，已拒绝保存（杜绝改名伪装）`,
+      }
+    }
+  }
+
+  // ③ 期望 SHA-256（字节级一致性：一致即同时证明无裁切/缩放/重编码/丢画面）
+  if (typeof exp.sha256 === "string" && /^[0-9a-f]{64}$/i.test(exp.sha256)) {
+    const actual = createHash("sha256").update(buf).digest("hex")
+    if (actual !== exp.sha256.toLowerCase()) {
+      return {
+        ...base,
+        ok: false,
+        code: "DOWNLOAD_SHA256_MISMATCH",
+        sha256: actual,
+        msg: `文件内容与官网原图不一致（SHA-256 校验失败），已拒绝保存（可能被 CDN 动态处理或返回了非原文件）`,
+      }
+    }
+    return { ok: true, ...base, sha256: actual }
+  }
+
+  // ④ 体积下限（辅助线：官方 contentSize 的保守折扣，防同尺寸重压缩缩水）
+  if (Number(exp.minBytes) > 0 && bytes < Number(exp.minBytes)) {
     return {
       ...base,
       ok: false,
-      code: "DOWNLOAD_QUALITY_MISMATCH",
-      msg: `下载内容疑似预览图（${info.width}×${info.height}，仅 ${(bytes / 1024).toFixed(0)}KB），已拒绝保存`,
+      code: "DOWNLOAD_SIZE_MISMATCH",
+      msg:
+        `文件大小异常偏小（实际 ${(bytes / 1024 / 1024).toFixed(2)}MB，官网原图约 ` +
+        `${(Number(exp.minBytes) / 1024 / 1024).toFixed(2)}MB 以上），疑似重新压缩版本，已拒绝保存`,
+    }
+  }
+
+  // ⑤ 预览兜底线（仅在拿不到官方期望宽高时启用）
+  if (!dimsVerified) {
+    if (longSide <= PREVIEW_LONG_SIDE_MAX) {
+      return {
+        ...base,
+        ok: false,
+        code: "DOWNLOAD_QUALITY_MISMATCH",
+        msg:
+          `官网返回的是预览图而非原图（${info.width}×${info.height}，${(bytes / 1024).toFixed(0)}KB` +
+          `，官方预览上限 ${PREVIEW_LONG_SIDE_MAX}px），已拒绝保存`,
+      }
+    }
+    if (bytes < SUSPICIOUS_SMALL_BYTES && longSide < LOW_RES_LONG_SIDE) {
+      return {
+        ...base,
+        ok: false,
+        code: "DOWNLOAD_QUALITY_MISMATCH",
+        msg: `下载内容疑似预览图（${info.width}×${info.height}，仅 ${(bytes / 1024).toFixed(0)}KB），已拒绝保存`,
+      }
     }
   }
   return { ok: true, ...base }
