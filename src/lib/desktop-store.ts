@@ -48,14 +48,19 @@ export interface DesktopBridge {
   loginVerify(wtId: string): Promise<{ valid: boolean | null; msg?: string }>
   /**
    * 原图直存：主进程完成 ALTCHA 人机验证 → getCompleteUrl 换官网原图直链 →
-   * 下载字节直接写入壁纸保存目录。无令牌 / 令牌失效返回 ok:false + reason，
-   * 渲染层据此回退 CDN 预览直链并提示重新扫码。
+   * 下载字节经字节级质量校验（预览图/未知格式一律拒绝保存）后直接写入
+   * 壁纸保存目录。ok=false 时绝不落盘：无令牌 / 令牌失效 / 质量不达标 /
+   * 官网异常，渲染层按 reason 引导扫码或提示重试。
    */
   downloadOriginal(wtId: string, filename: string, previewSrc: string): Promise<{
     ok: boolean
     quality: "original" | "preview"
-    reason?: "no-token" | "auth-expired" | "error"
+    reason?: "no-token" | "auth-expired" | "error" | "quality-mismatch"
     savedPath?: string
+    width?: number
+    height?: number
+    format?: string
+    bytes?: number
     msg?: string
   }>
   /** 菜单「微信扫码登录…」点击：通知渲染层打开登录弹窗 */

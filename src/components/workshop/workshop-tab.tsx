@@ -30,7 +30,6 @@ import {
   clearAllDownloads,
   blockWallpaper,
   clearAllBlocked,
-  prepareWallpaperBlob,
   saveBlobViaAnchor,
   safeClientName,
 } from "@/lib/workshop-source"
@@ -106,8 +105,18 @@ export function WorkshopTab() {
   const [saveDir, setSaveDir] = useState<string | null>(null)
   /** 扫码登录弹窗（v1.4.9：桌面版主进程托管 / 服务器版 API） */
   const [tokenOpen, setTokenOpen] = useState(false)
-  /** 因未登录被拦下的待补下载壁纸（登录成功后自动重试，v1.4.12） */
-  const pendingDownloadRef = useRef<ZhefengWallpaper | null>(null)
+  /** 因未登录被拦下的待补下载壁纸（登录成功后自动重试，v1.4.13） */
+  const pendingDownloadsRef = useRef<ZhefengWallpaper[]>([])
+
+  /** 记录待续传壁纸（登录成功后自动继续，单张/批量通用；按 id 去重） */
+  const queuePendingDownload = useCallback((ws: ZhefengWallpaper[]) => {
+    if (ws.length === 0) return
+    setPending((prev) => {
+      const ids = new Set(prev.map((w) => w.id))
+      return [...prev, ...ws.filter((w) => !ids.has(w.id))]
+    })
+  }, [])
+  const [pending, setPending] = useState<ZhefengWallpaper[]>([])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -422,12 +431,14 @@ export function WorkshopTab() {
   }
 
   /**
-   * 下载前置检查（v1.4.12）：桌面版先本地读令牌，未登录直接引导扫码，
+   * 下载前置检查（v1.4.13）：桌面版先本地读令牌，未登录直接引导扫码，
    * 不乐观移除卡片、不触发下载（官网原图仅对登录用户开放）。
+   * @param targets 本次想下载的目标（单张或整批）：未登录时全部入续传队列，
+   * 登录成功后自动继续，不需要用户重新找图再点一次。
    * 返回 true = 已登录 / 无需检查（非桌面模式），可继续下载。
    */
   const ensureLoginOrGuide = useCallback(
-    (w: ZhefengWallpaper | null): Promise<boolean> => {
+    (targets: ZhefengWallpaper[]): Promise<boolean> => {
       if (!IS_STATIC_EXPORT || !desktopBridge) return Promise.resolve(true)
       return (async () => {
         try {
@@ -437,7 +448,7 @@ export function WorkshopTab() {
           /* 本地读失败（罕见）：放行走主进程链路兜底，避免误拦 */
           return true
         }
-        if (w) pendingDownloadRef.current = w
+        queuePendingDownload(targets)
         toast.warning("下载高清原图需先扫码登录", {
           description:
             "实测官网原图仅对登录用户开放（未登录直链只回 890px 预览小图）。微信扫码登录一次，即可下载与官网完全一致的 4K/7K 原画。",
@@ -447,127 +458,150 @@ export function WorkshopTab() {
         return false
       })()
     },
-    []
+    [queuePendingDownload]
   )
 
   /**
-   * 触发一个下载（v1.4.12 质量硬保证）。
+   * 触发一个下载（v1.4.13 质量硬保证）。
    *
-   * 背景（实测官网 CDN 行为）：未登录状态即使访问原图 .png 直链，
-   * CDN 也只回 890×556 / 约 25KB 的 webp 预览小图；4K/7K 原图仅对
-   * 登录用户通过「ALTCHA 人机验证 + getCompleteUrl 签名直链」开放。
+   * 背景（实测官网 CDN 行为，scripts/original-download-quality-test.mjs 取证）：
+   * 未登录状态即使访问原图 .png 直链，CDN 也只回 890×556 / 约 25KB 的 webp
+   * 预览小图；4K/7K 原图仅对登录用户通过「ALTCHA 人机验证 + getCompleteUrl
+   * 签名直链」开放（未登录 401）。
    *
-   * 因此不再「静默回退保存小图」（用户拿到模糊图还以为坏了）：
-   * 1. 桌面版（Electron 桥）：主进程原图直存（令牌 + ALTCHA +
-   *    getCompleteUrl）。无令牌 / 令牌失效 → 弹「扫码登录」引导
-   *    （toast 一键打开登录弹窗，登录成功自动补下这一张）。
-   * 2. 静态 Pages 版（无桥）：只能拿 CDN 预览，保存时明确标注质量。
-   * 3. 服务器版：/api 代理 fetch + blob（读 X-Wallpaper-Quality 头提示）。
+   * 三条链路遵守同一铁律 —— 拿不到原图就不保存、明确提示：
+   * 1. 桌面版（Electron 桥）：主进程原图直存 + 字节级质量校验（预览图
+   *    拒绝保存）。无令牌 / 令牌失效 / 质量不达标 → 引导扫码，登录成功
+   *    自动续传刚才那批，绝不静默保存小图冒充原图。
+   * 2. 服务器版：/api 代理 + 同样的质量校验；无令牌 401 → 引导扫码续传。
+   * 3. Pages 在线版（无桥无令牌链路）：只引导安装桌面版，不保存预览图。
+   *
+   * 返回 Promise<boolean>：true = 下载成功（已保存）；false = 未保存
+   * （引导登录 / 质量拦截 / 异常，对应 toast 已由本函数弹出）。
+   * 调用方据此决定是否乐观移除卡片 —— 失败的壁纸留在原地不误导。
    */
-  const triggerDownload = (w: ZhefengWallpaper) => {
+  const triggerDownload = (w: ZhefengWallpaper): Promise<boolean> => {
     if (IS_STATIC_EXPORT) {
-      void (async () => {
-        try {
-          // 桌面版：主进程原图直存（成功则直接写入保存目录并弹系统通知）
-          if (desktopBridge) {
-            try {
-              const r = await desktopBridge.downloadOriginal(
-                w.wtId || w.id,
-                safeClientName(w.title),
-                w.src
-              )
-              if (r.ok) {
-                recordLocalDownload({ id: w.id, title: w.title, src: w.src })
-                toast.success("已保存高清原图（与官网一致）", {
-                  description: r.savedPath,
-                  duration: 6000,
-                })
-                return
-              }
-              // 无令牌 / 令牌失效：引导重新扫码，不保存 890px 小图冒充原图
-              if (r.reason === "no-token" || r.reason === "auth-expired") {
-                pendingDownloadRef.current = w
-                toast.warning(
-                  r.reason === "auth-expired" ? "登录令牌已失效，请重新扫码" : "下载高清原图需先扫码登录",
-                  {
-                    description:
-                      "官网原图仅对登录用户开放（未登录直链只回 890px 预览小图）。扫码登录后自动继续下载这一张。",
-                    duration: 15000,
-                    action: { label: r.reason === "auth-expired" ? "重新扫码" : "立即扫码", onClick: () => setTokenOpen(true) },
-                  }
-                )
-                return
-              }
-              // 官网接口 / 网络异常：提示重试，不静默降级（避免误收模糊图）
-              toast.error("原图下载失败，请稍后重试", {
-                description: r.msg,
-                duration: 8000,
+      return (async () => {
+        // 桌面版：主进程原图直存（成功则直接写入保存目录并弹系统通知）
+        if (desktopBridge) {
+          try {
+            const r = await desktopBridge.downloadOriginal(
+              w.wtId || w.id,
+              safeClientName(w.title),
+              w.src
+            )
+            if (r.ok) {
+              recordLocalDownload({ id: w.id, title: w.title, src: w.src })
+              toast.success("已保存高清原图（与官网一致）", {
+                description: r.savedPath
+                  ? `${r.savedPath}${r.width && r.height ? `（${r.width}×${r.height}）` : ""}`
+                  : undefined,
+                duration: 6000,
               })
-              return
-            } catch {
-              /* 主进程异常：同样不静默降级 */
-              toast.error("原图下载失败，请稍后重试")
-              return
+              return true
             }
+            // 无令牌 / 令牌失效：引导重新扫码，登录后自动续传，不保存 890px 小图冒充原图
+            if (r.reason === "no-token" || r.reason === "auth-expired") {
+              queuePendingDownload([w])
+              toast.warning(
+                r.reason === "auth-expired" ? "登录令牌已失效，请重新扫码" : "下载高清原图需先扫码登录",
+                {
+                  description:
+                    "官网原图仅对登录用户开放（未登录直链只回 890px 预览小图）。扫码登录后自动继续下载这一张。",
+                  duration: 15000,
+                  action: { label: r.reason === "auth-expired" ? "重新扫码" : "立即扫码", onClick: () => setTokenOpen(true) },
+                }
+              )
+              return false
+            }
+            // 质量不达标（字节级校验拦截）：明确告知未保存，绝不留模糊图
+            if (r.reason === "quality-mismatch") {
+              toast.error("已拦截非原图内容，未保存任何文件", {
+                description: r.msg ?? "官网返回的内容未达到原图标准，已自动拒绝保存",
+                duration: 10000,
+              })
+              return false
+            }
+            // 官网接口 / 网络异常：提示重试，不静默降级（避免误收模糊图）
+            toast.error("原图下载失败，请稍后重试", {
+              description: r.msg,
+              duration: 8000,
+            })
+            return false
+          } catch {
+            /* 主进程异常：同样不静默降级 */
+            toast.error("原图下载失败，请稍后重试")
+            return false
           }
-          // Pages 在线版：无主进程无令牌链路，只能拿 CDN 预览（实测 890px）
-          const { blob, filename } = await prepareWallpaperBlob(w)
-          saveBlobViaAnchor(filename, blob)
-          toast.info("已保存预览质量（约 890px）", {
-            description:
-              "在线版受官网限制仅能获取预览图；安装桌面版并扫码登录，可下载与官网完全一致的 4K/7K 原图。",
-            duration: 9000,
-          })
-        } catch (e) {
-          toast.error("下载失败，请稍后重试", {
-            description: e instanceof Error ? e.message : undefined,
-          })
         }
+        // Pages 在线版：无主进程无令牌链路，官网原图拿不到 —— 明确引导
+        // 桌面版，绝不把 890px 预览小图保存给用户（v1.4.13 起不再保存预览）
+        toast.warning("在线版无法获取官网原图", {
+          description:
+            "官网原图仅对登录用户开放，网页在线版拿到的只会是 890px 预览小图。下载 Windows 桌面版并微信扫码登录，即可保存与官网完全一致的 4K/7K 原图。",
+          duration: 12000,
+          action: {
+            label: "获取桌面版",
+            onClick: () => window.open("https://github.com/xiaobaiba999/bizhi/releases", "_blank"),
+          },
+        })
+        return false
       })()
-      return
     }
-    // 服务器版：fetch + blob 下载（能读质量 / 令牌失效响应头，给出对应提示）
-    void (async () => {
+    // 服务器版：fetch + blob 下载（服务端已做质量校验；401 引导扫码续传）
+    return (async () => {
       try {
         const res = await fetch(
           `/api/wallpapers/download?src=${encodeURIComponent(w.src)}&name=${encodeURIComponent(
             w.title
           )}&id=${encodeURIComponent(w.id)}&wtId=${encodeURIComponent(w.wtId || w.id)}`
         )
+        if (res.status === 401) {
+          const data = (await res.json().catch(() => null)) as { error?: string; msg?: string } | null
+          queuePendingDownload([w])
+          toast.warning(
+            data?.error === "AUTH_EXPIRED" ? "登录令牌已失效，请重新扫码" : "下载高清原图需先扫码登录",
+            {
+              description:
+                "官网原图仅对登录用户开放（未登录只能拿到 890px 预览小图）。扫码登录后自动继续下载这一张。",
+              duration: 15000,
+              action: {
+                label: data?.error === "AUTH_EXPIRED" ? "重新扫码" : "立即扫码",
+                onClick: () => setTokenOpen(true),
+              },
+            }
+          )
+          return false
+        }
         if (!res.ok) {
-          const data = (await res.json().catch(() => null)) as { error?: string } | null
-          toast.error("原图下载失败，请稍后重试", { description: data?.error })
-          return
+          const data = (await res.json().catch(() => null)) as { error?: string; msg?: string } | null
+          if (data?.error === "DOWNLOAD_QUALITY_MISMATCH") {
+            toast.error("已拦截非原图内容，未保存任何文件", {
+              description: data.msg,
+              duration: 10000,
+            })
+            return false
+          }
+          toast.error("原图下载失败，请稍后重试", { description: data?.msg ?? data?.error })
+          return false
         }
         const blob = await res.blob()
-        const quality = res.headers.get("X-Wallpaper-Quality")
-        const authExpired = res.headers.get("X-Auth-Expired") === "1"
-        // 文件名优先取服务端清洗过的（Content-Disposition），失败本地拼
+        const dims = res.headers.get("X-Image-Dimensions")
+        // 文件名优先取服务端按真实内容定的（Content-Disposition）
         const cd = res.headers.get("Content-Disposition") ?? ""
         const m = /filename\*=UTF-8''([^;]+)/.exec(cd)
-        const dot = w.src.lastIndexOf(".")
-        const ext = dot === -1 ? "png" : w.src.slice(dot + 1).toLowerCase()
-        const filename = m ? decodeURIComponent(m[1]) : `${safeClientName(w.title)}.${ext}`
+        const filename = m ? decodeURIComponent(m[1]) : `${safeClientName(w.title)}.png`
         saveBlobViaAnchor(filename, blob)
-        if (authExpired) {
-          toast.warning("令牌已失效，本次为预览质量（890px）", {
-            description: "重新扫码登录后即可恢复与官网一致的高清原图。",
-            duration: 10000,
-            action: { label: "重新扫码", onClick: () => setTokenOpen(true) },
-          })
-        } else if (quality === "original") {
-          toast.success("已保存高清原图（与官网一致）")
-        } else {
-          toast.info("已保存预览质量（约 890px）", {
-            description: "扫码登录后可下载与官网完全一致的高清原图。",
-            duration: 8000,
-            action: { label: "扫码领原图", onClick: () => setTokenOpen(true) },
-          })
-        }
+        toast.success("已保存高清原图（与官网一致）", {
+          description: dims ? `分辨率 ${dims}` : undefined,
+        })
+        return true
       } catch (e) {
         toast.error("下载失败，请稍后重试", {
           description: e instanceof Error ? e.message : undefined,
         })
+        return false
       }
     })()
   }
@@ -626,12 +660,13 @@ export function WorkshopTab() {
   /**
    * 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再排队回源），
    * 18 张全部铺开也不会挤占缩略图代理的带宽。
-   * v1.4.12：桌面版先预检令牌，未登录一次引导（不逐张弹 toast）。
+   * v1.4.13：桌面版先预检令牌，未登录一次引导（不逐张弹 toast）；
+   * 整批进入续传队列，登录成功后自动继续整批。
    */
   const batchDownload = () => {
     if (selected.length === 0) return
     void (async () => {
-      if (!(await ensureLoginOrGuide(null))) return
+      if (!(await ensureLoginOrGuide(selected))) return
       selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 700))
       toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
         duration: 6000,
@@ -651,20 +686,21 @@ export function WorkshopTab() {
   }
 
   /**
-   * 单张下载入口（v1.4.12）：先确保已登录（桌面版），未登录引导扫码且
-   * 不做乐观移除（卡片留在原地）；已登录才触发下载 + 乐观移除。
+   * 单张下载入口（v1.4.13）：先确保已登录（桌面版），未登录引导扫码且
+   * 卡片留在原地；已登录才触发下载，**下载成功才乐观移除**（失败不误导）。
    */
   const downloadOne = (w: ZhefengWallpaper) => {
     void (async () => {
-      if (!(await ensureLoginOrGuide(w))) return
-      triggerDownload(w)
-      onDownloadOne(w)
+      if (!(await ensureLoginOrGuide([w]))) return
+      toast.info(`正在获取「${w.title}」的高清原图…`)
+      const ok = await triggerDownload(w)
+      if (ok) onDownloadOne(w)
     })()
   }
 
-  /** 单张下载：乐观移除（hideDownloaded 开启时） */
+  /** 单张下载成功后：隐藏卡片 + 计数（v1.4.13：仅在真实保存成功后调用） */
   const onDownloadOne = (w: ZhefengWallpaper) => {
-    toast.success(`开始下载「${w.title}」，下载过的壁纸之后不再显示`)
+    toast.success(`「${w.title}」原图已保存，下载过的壁纸之后不再显示`)
     if (hideDownloaded) {
       setList((s) => ({ ...s, items: s.items.filter((i) => i.id !== w.id) }))
       setDownloadedCount((n) => n + 1)
@@ -723,7 +759,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.12 桌面版
+            v1.4.13 桌面版
           </span>
           {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
               纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
@@ -1127,15 +1163,23 @@ export function WorkshopTab() {
           onOpenChange={setTokenOpen}
           probeWtId={list.items[0]?.wtId ?? list.items[0]?.id ?? null}
           onLoggedIn={() => {
-            // 登录成功 → 自动补下刚才因未登录被拦下的那一张（v1.4.12）
-            const w = pendingDownloadRef.current
-            if (!w) return
-            pendingDownloadRef.current = null
-            toast.success("登录成功，正在继续下载刚才的高清原图")
-            setTimeout(() => {
-              triggerDownload(w)
-              onDownloadOne(w)
-            }, 800)
+            // 登录成功 → 自动续传刚才因未登录被拦下的那批（v1.4.13：单张/批量通用）
+            const queue = pending
+            if (queue.length === 0) return
+            setPending([])
+            toast.success(
+              queue.length === 1
+                ? "登录成功，正在继续下载刚才的高清原图"
+                : `登录成功，正在继续下载刚才的 ${queue.length} 张高清原图`
+            )
+            queue.forEach((w, i) =>
+              setTimeout(() => {
+                void (async () => {
+                  const ok = await triggerDownload(w)
+                  if (ok) onDownloadOne(w)
+                })()
+              }, 800 + i * 700)
+            )
           }}
         />
       )}
