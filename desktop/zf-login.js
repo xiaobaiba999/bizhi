@@ -220,6 +220,51 @@ function digUrl(data, depth = 0) {
   return digUrl(data.data, depth + 1);
 }
 
+/* ---------------- 官网风控受限熔断（v1.4.15） ---------------- */
+
+/**
+ * 实测（2026-11 用户报告）：高频调用 getCompleteUrl 会触发官网风控，业务
+ * 响应 msg 形如「下载功能暂时受限，预计恢复时间：2027-11-16 22:19:08。
+ * 若有疑问请联系客服。」——恢复时间可能长达一年，且继续撞击只会加重。
+ *
+ * 熔断策略：
+ * - 检测到受限 → 恢复时间前所有下载快速失败（reason="restricted"，
+ *   零官网请求），UI 弹单一明确提示并中止批量剩余项；
+ * - 每 30 分钟放行一次真实探测（防官网消息不准/提前解封导致长期误熔断）；
+ * - 429 短时限流 → 60 秒短熔断（防批量连撞）；
+ * - 串行队列最小间隔 2.5s（拟人节奏，降低风控触发概率）。
+ */
+const RESTRICTED_PROBE_MS = 30 * 60 * 1000;
+/** 受限消息关键词（官网风控文案） */
+const RESTRICTED_RE = /受限|恢复时间|禁止下载|封禁|联系客服/;
+
+/** 从官网 msg 里解析「恢复时间：YYYY-MM-DD HH:mm[:ss]」→ epoch ms（本地时区） */
+function parseRestrictedUntil(msg) {
+  const m = String(msg || "").match(
+    /(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/
+  );
+  if (!m) return 0;
+  const t = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6] || 0)
+  ).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** 剩余时长人类可读（受限提示展示） */
+function humanizeRemain(ms) {
+  if (ms <= 0) return "即将恢复";
+  const min = Math.round(ms / 60000);
+  if (min < 60) return `约 ${min} 分钟`;
+  const hours = Math.round(min / 60);
+  if (hours < 48) return `约 ${hours} 小时`;
+  return `约 ${Math.round(hours / 24)} 天`;
+}
+
 /** lp 响应解析：window.wx_errcode=405;window.wx_code='xxx'; */
 function parseLp(text) {
   const ec = text.match(/wx_errcode=(\d+)/);
@@ -556,6 +601,58 @@ function createLoginModule(deps) {
 
   let dlChain = Promise.resolve();
 
+  /* v1.4.15 官网风控熔断状态（内存态，重启应用后重新探测） */
+  let restrictedUntil = 0; // epoch ms，0 = 未受限
+  let restrictedMsg = ""; // 官网原始消息（展示用）
+  let restrictedProbeAt = 0; // 上次真实探测时间（受限期内 30 分钟一次）
+  let lastDlStartAt = 0; // 上次下载开始时间（串行最小间隔节流）
+  const DL_MIN_GAP_MS = 2500; // 相邻两次下载最小间隔（拟人节奏）
+
+  /** 标记受限（msg 可为空：429 短熔断；无恢复时间兑底 fallbackMs） */
+  const markRestricted = (msg, fallbackMs) => {
+    restrictedMsg = String(msg || "");
+    const until = parseRestrictedUntil(restrictedMsg);
+    restrictedUntil =
+      until > Date.now() ? until : Date.now() + (fallbackMs ?? 10 * 60 * 1000);
+    restrictedProbeAt = Date.now();
+    log(
+      `官网风控受限熔断启动：至 ${new Date(restrictedUntil).toLocaleString()}（${
+        restrictedMsg || "429 限流"
+      }），期间下载快速失败，每 30 分钟探测一次`
+    );
+  };
+
+  /** 构造受限结果（reason=restricted，UI 据此熔断批量并给单一明确提示） */
+  const restrictedResult = () => {
+    const remain = restrictedUntil > Date.now() ? restrictedUntil - Date.now() : 0;
+    return {
+      ok: false,
+      quality: "preview",
+      reason: "restricted",
+      recoverAt: restrictedUntil || undefined,
+      msg:
+        `官网下载功能暂时受限${
+          restrictedUntil
+            ? `，预计 ${humanizeRemain(remain)}后恢复（${new Date(restrictedUntil).toLocaleString()}）`
+            : ""
+        }。` +
+        (restrictedMsg ? `官网提示：${restrictedMsg} ` : "") +
+        "已自动暂停下载，期间不再请求官网；若有疑问请联系官网客服。",
+    };
+  };
+
+  /** 受限期内且未到探测窗口 → true（快速失败，零官网请求） */
+  const restrictedFused = () =>
+    restrictedUntil > Date.now() &&
+    Date.now() - restrictedProbeAt < RESTRICTED_PROBE_MS;
+
+  /** getCompleteUrl 业务错误 msg → 命中风控关键词则熔断（返回受限结果，否则 null） */
+  const checkRestricted = (msg) => {
+    if (!RESTRICTED_RE.test(String(msg || ""))) return null;
+    markRestricted(msg);
+    return restrictedResult();
+  };
+
   /** 校验失败码 → 结果 reason（UI 据此弹对应文案） */
   const reasonOfCode = (code) =>
     ({
@@ -575,6 +672,12 @@ function createLoginModule(deps) {
   const runOriginalDownload = async (wtId, filename) => {
     const token = rawToken();
     if (!token) return { ok: false, quality: "preview", reason: "no-token" };
+
+    // v1.4.15 风控熔断：受限期内快速失败（零官网请求），探测窗口放行一次
+    if (restrictedUntil > Date.now()) {
+      if (restrictedFused()) return restrictedResult();
+      restrictedProbeAt = Date.now(); // 放行一次探测（失败会重新熔断）
+    }
 
     const id = /^[0-9A-Za-z_-]{1,64}$/.test(String(wtId || "")) ? wtId : null;
     if (!id) return { ok: false, quality: "preview", reason: "error", msg: "壁纸 id 不合法" };
@@ -604,7 +707,15 @@ function createLoginModule(deps) {
         signal: AbortSignal.timeout(15000),
       });
       if (res.status === 429) {
-        return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
+        // v1.4.15：429 限流短熔断 60s（防批量连撞加重风控）
+        markRestricted("", 60_000);
+        return {
+          ok: false,
+          quality: "preview",
+          reason: "restricted",
+          recoverAt: restrictedUntil,
+          msg: "官网限流：操作太快了，已自动放慢并暂停 1 分钟后再试",
+        };
       }
       const json = await res.json().catch(() => null);
       target = json ? digUrl(json) : null;
@@ -623,7 +734,14 @@ function createLoginModule(deps) {
             signal: AbortSignal.timeout(15000),
           });
           if (res2.status === 429) {
-            return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
+            markRestricted("", 60_000);
+            return {
+              ok: false,
+              quality: "preview",
+              reason: "restricted",
+              recoverAt: restrictedUntil,
+              msg: "官网限流：操作太快了，已自动放慢并暂停 1 分钟后再试",
+            };
           }
           const json2 = await res2.json().catch(() => null);
           target = json2 ? digUrl(json2) : null;
@@ -633,10 +751,26 @@ function createLoginModule(deps) {
             if (status2 === 401 || /未授权/.test(msg2)) {
               return { ok: false, quality: "preview", reason: "auth-expired", msg: msg2 };
             }
-            return { ok: false, quality: "preview", reason: "error", msg: msg2 || `官网接口异常（HTTP ${status2}）` };
+            // v1.4.15：官网风控「下载功能暂时受限」→ 熔断
+            return (
+              checkRestricted(msg2) || {
+                ok: false,
+                quality: "preview",
+                reason: "error",
+                msg: msg2 || `官网接口异常（HTTP ${status2}）`,
+              }
+            );
           }
         } else {
-          return { ok: false, quality: "preview", reason: "error", msg: msg || `官网接口异常（HTTP ${res.status}）` };
+          // v1.4.15：官网风控「下载功能暂时受限」→ 熔断
+          return (
+            checkRestricted(msg) || {
+              ok: false,
+              quality: "preview",
+              reason: "error",
+              msg: msg || `官网接口异常（HTTP ${res.status}）`,
+            }
+          );
         }
       }
     } catch (e) {
@@ -655,7 +789,15 @@ function createLoginModule(deps) {
         signal: AbortSignal.timeout(120_000),
       });
       if (upstream.status === 429) {
-        return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
+        // v1.4.15：CDN 字节流 429 也短熔断（同一风控体系）
+        markRestricted("", 60_000);
+        return {
+          ok: false,
+          quality: "preview",
+          reason: "restricted",
+          recoverAt: restrictedUntil,
+          msg: "官网限流：操作太快了，已自动放慢并暂停 1 分钟后再试",
+        };
       }
       if (!upstream.ok) {
         return { ok: false, quality: "preview", reason: "error", msg: `原图下载失败（HTTP ${upstream.status}）` };
@@ -715,9 +857,19 @@ function createLoginModule(deps) {
     }
   };
 
-  /** 入队一次原图下载（串行执行，返回统一结果） */
+  /**
+   * 入队一次原图下载（串行执行 + v1.4.15 节流，返回统一结果）。
+   * 受限熔断快速失败不排队（零等待零官网请求）；正常任务串行且相邻
+   * 至少间隔 2.5s（批量 18 张 ≈ 45 秒+，拟人节奏降低风控触发概率）。
+   */
   const downloadOriginal = (wtId, filename) => {
-    const task = dlChain.then(() => runOriginalDownload(wtId, filename));
+    if (restrictedFused()) return Promise.resolve(restrictedResult());
+    const task = dlChain.then(async () => {
+      const wait = lastDlStartAt + DL_MIN_GAP_MS - Date.now();
+      if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+      lastDlStartAt = Date.now();
+      return runOriginalDownload(wtId, filename);
+    });
     // 链上异常不阻塞后续任务
     dlChain = task.catch(() => undefined);
     return task;

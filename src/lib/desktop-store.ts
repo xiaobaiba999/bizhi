@@ -60,6 +60,7 @@ export interface DesktopBridge {
     reason?:
       | "no-token"
       | "auth-expired"
+      | "restricted"
       | "error"
       | "quality-mismatch"
       | "resolution-mismatch"
@@ -77,6 +78,8 @@ export interface DesktopBridge {
     bytes?: number
     /** true = 本次经过了官方元数据期望宽高的硬校验 */
     metaVerified?: boolean
+    /** v1.4.15：官网风控受限预计恢复时间（epoch ms，受限时回传） */
+    recoverAt?: number
     msg?: string
   }>
   /** 菜单「微信扫码登录…」点击：通知渲染层打开登录弹窗 */

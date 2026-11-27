@@ -55,10 +55,11 @@ interface ListState {
 
 const INITIAL: ListState = { items: [], hasMore: true, loading: false, error: null }
 
-/** 下载失败原因（与服务端 502 error 码 / 主进程 reason 对齐） */
+/** 下载失败原因（与服务端 502/429 error 码 / 主进程 reason 对齐） */
 type DownloadFailReason =
   | "no-token"
   | "auth-expired"
+  | "restricted"
   | "error"
   | "quality-mismatch"
   | "resolution-mismatch"
@@ -88,6 +89,7 @@ function failBrief(r: DownloadResult): string {
   switch (r.reason) {
     case "no-token": return "需扫码登录"
     case "auth-expired": return "登录已失效"
+    case "restricted": return "官网下载功能受限（已自动暂停）"
     case "resolution-mismatch": return "分辨率与官网原图不符"
     case "format-mismatch": return "格式与官网原图不符"
     case "size-mismatch": return "体积异常偏小（疑似重压缩）"
@@ -96,6 +98,11 @@ function failBrief(r: DownloadResult): string {
     default: return r.msg ? r.msg.slice(0, 40) : "下载失败"
   }
 }
+
+/** 批量下载相邻两张间隔（v1.4.15：拟人节奏降低官网风控触发概率，
+ *  旧版 700ms 过快——实测高频 getCompleteUrl 会触发官网长期风控） */
+const BATCH_DL_GAP_MS = 3000
+const BATCH_DL_JITTER_MS = 1500
 
 /** 首屏填充目标（v1.4.11）：一次加载至少铺满两屏，官网级满屏体验 */
 const FIRST_FILL_TARGET = 48
@@ -503,6 +510,38 @@ export function WorkshopTab() {
     [queuePendingDownload]
   )
 
+  /** 受限提示上次弹出时间（10 秒内去重：连点/批量中止只弹一条） */
+  const restrictedToastAt = useRef(0)
+
+  /**
+   * 官网风控受限提示（v1.4.15）：
+   * 「下载功能暂时受限，预计恢复时间：20XX-…」是官网服务端风控文案，
+   * 应用无法解封——明确告知已自动熔断（期间零官网请求，避免加重），
+   * 并给出申诉路径（官网登录后联系客服）。
+   */
+  const showRestrictedToast = (msg?: string, recoverAt?: number) => {
+    const now = Date.now()
+    if (now - restrictedToastAt.current < 10_000) return
+    restrictedToastAt.current = now
+    const until = recoverAt ? new Date(recoverAt) : null
+    const remain = until ? until.getTime() - now : 0
+    const remainText =
+      remain > 48 * 3600_000
+        ? `约 ${Math.round(remain / 86400_000)} 天`
+        : remain > 3600_000
+          ? `约 ${Math.round(remain / 3600_000)} 小时`
+          : remain > 0
+            ? `约 ${Math.max(1, Math.round(remain / 60_000))} 分钟`
+            : ""
+    toast.warning("官网下载功能暂时受限，已自动暂停", {
+      description:
+        (msg?.slice(0, 120) ?? "官网风控暂时限制了下载功能") +
+        (until ? `（预计 ${remainText}后、${until.toLocaleString()} 恢复）` : "") +
+        "。期间不再请求官网以免加重限制；可到官网登录后联系客服申诉。",
+      duration: 15000,
+    })
+  }
+
   /**
    * 触发一个下载（v1.4.14 原图完整性硬保证）。
    *
@@ -575,6 +614,12 @@ export function WorkshopTab() {
                 }
               )
               return { ok: false, reason: r.reason }
+            }
+            // v1.4.15 官网风控受限：主进程已熔断（期间零官网请求），
+            // 明确告知用户并给出申诉路径，不误导为应用故障
+            if (r.reason === "restricted") {
+              showRestrictedToast(r.msg, r.recoverAt)
+              return { ok: false, reason: "restricted", msg: r.msg }
             }
             // 分辨率与官网不符（裁切/缩放/拉伸/改比例全部落在这里）：明确告知未保存
             if (r.reason === "resolution-mismatch") {
@@ -651,6 +696,20 @@ export function WorkshopTab() {
             }
           )
           return { ok: false, reason: data?.error === "AUTH_EXPIRED" ? "auth-expired" : "no-token" }
+        }
+        if (res.status === 429) {
+          const data = (await res.json().catch(() => null)) as {
+            error?: string
+            msg?: string
+            recoverAt?: number
+          } | null
+          // v1.4.15 官网风控受限（服务端已熔断）：明确提示 + 中止批量
+          if (data?.error === "DOWNLOAD_RESTRICTED") {
+            showRestrictedToast(data.msg, data.recoverAt)
+            return { ok: false, reason: "restricted", msg: data.msg }
+          }
+          toast.error("操作太快了，请稍等一分钟再试")
+          return { ok: false, reason: "error" }
         }
         if (!res.ok) {
           const data = (await res.json().catch(() => null)) as {
@@ -757,9 +816,10 @@ export function WorkshopTab() {
   }, [])
 
   /**
-   * 批量下载选中壁纸（v1.4.14 逐张硬校验）：0.7s 间隔逐张触发，每张独立过
-   * 官方元数据期望宽高闸门 —— 只有真实保存成功的才隐藏卡片，失败的原地
-   * 保留并逐张提示原因，最后汇总「成功 X / 失败 Y + 失败清单」。
+   * 批量下载选中壁纸（v1.4.14 逐张硬校验；v1.4.15 拟人节奏）：3s+随机
+   * 抖动间隔逐张触发，每张独立过官方元数据期望宽高闸门 —— 只有真实保存
+   * 成功的才隐藏卡片，失败的原地保留并逐张提示原因，最后汇总
+   * 「成功 X / 失败 Y + 失败清单」；一旦官网风控受限立即中止剩余批次。
    * 绝不因前面几张成功就把整批当作成功。
    */
   const batchDownload = () => {
@@ -768,16 +828,23 @@ export function WorkshopTab() {
       if (!(await ensureLoginOrGuide(selected))) return
       const targets = [...selected]
       setSelected([])
-      toast.info(`开始逐张下载 ${targets.length} 张（每张独立校验官网原图）…`, {
+      toast.info(`开始逐张下载 ${targets.length} 张（每张独立校验官网原图，间隔 3 秒拟人节奏）…`, {
         duration: 4000,
       })
       const results: { w: ZhefengWallpaper; r: DownloadResult }[] = []
+      // v1.4.15：一旦官网风控受限立即中止剩余批次（继续撞击只会加重封禁）
+      let restrictedAbort = false
       for (let i = 0; i < targets.length; i++) {
-        if (i > 0) await new Promise((res) => setTimeout(res, 700))
-        results.push({
-          w: targets[i],
-          r: await triggerDownload(targets[i], { silentSuccess: true }),
-        })
+        if (i > 0)
+          await new Promise((res) =>
+            setTimeout(res, BATCH_DL_GAP_MS + Math.random() * BATCH_DL_JITTER_MS)
+          )
+        const r = await triggerDownload(targets[i], { silentSuccess: true })
+        results.push({ w: targets[i], r })
+        if (r.reason === "restricted") {
+          restrictedAbort = true
+          break
+        }
       }
       const okItems = results.filter((x) => x.r.ok)
       const failItems = results.filter((x) => !x.r.ok)
@@ -788,7 +855,15 @@ export function WorkshopTab() {
         setDownloadedCount((n) => n + okIds.size)
       }
       // 汇总（成功一张/多张都给明确结果；失败清单逐张列出原因）
-      if (failItems.length === 0) {
+      if (restrictedAbort) {
+        const skipped = targets.length - results.length
+        toast.warning(`批量下载已中止：成功 ${okItems.length} 张`, {
+          description:
+            `官网下载功能暂时受限，剩余 ${skipped} 张已停止请求（继续请求可能加重官网风控）。` +
+            `恢复后可重新勾选下载。`,
+          duration: 15000,
+        })
+      } else if (failItems.length === 0) {
         toast.success(`批量下载完成：${okItems.length} 张全部保存为官网原图`, { duration: 6000 })
       } else {
         const lines = failItems
@@ -887,7 +962,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.14 桌面版
+            v1.4.15 桌面版
           </span>
           {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
               纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
@@ -1303,12 +1378,19 @@ export function WorkshopTab() {
             )
             void (async () => {
               const results: { w: ZhefengWallpaper; r: DownloadResult }[] = []
+              let restrictedAbort = false
               for (let i = 0; i < queue.length; i++) {
-                if (i > 0) await new Promise((res) => setTimeout(res, 700))
-                results.push({
-                  w: queue[i],
-                  r: await triggerDownload(queue[i], { silentSuccess: queue.length > 1 }),
-                })
+                if (i > 0)
+                  await new Promise((res) =>
+                    setTimeout(res, BATCH_DL_GAP_MS + Math.random() * BATCH_DL_JITTER_MS)
+                  )
+                const r = await triggerDownload(queue[i], { silentSuccess: queue.length > 1 })
+                results.push({ w: queue[i], r })
+                // v1.4.15：风控受限立即中止续传批次（继续撞击只会加重封禁）
+                if (r.reason === "restricted") {
+                  restrictedAbort = true
+                  break
+                }
               }
               const okIds = new Set(
                 results.filter((x) => x.r.ok).map((x) => x.w.id)
@@ -1323,7 +1405,16 @@ export function WorkshopTab() {
               }
               const fails = results.filter((x) => !x.r.ok)
               if (queue.length > 1) {
-                if (fails.length === 0) {
+                if (restrictedAbort) {
+                  toast.warning(
+                    `续传已中止：成功 ${okIds.size} 张，剩余 ${queue.length - results.length} 张未尝试`,
+                    {
+                      description:
+                        "官网下载功能暂时受限，已停止请求以免加重风控；恢复后可重新下载。",
+                      duration: 15000,
+                    }
+                  )
+                } else if (fails.length === 0) {
                   toast.success(`续传完成：${results.length} 张全部保存为官网原图`)
                 } else {
                   toast.warning(

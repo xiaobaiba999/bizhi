@@ -1,9 +1,9 @@
 {
   "name": "wallpaper-workshop-desktop",
   "productName": "壁纸工坊",
-  "version": "1.4.14",
+  "version": "1.4.15",
   "private": true,
-  "description": "壁纸工坊 Windows 桌面版（Electron 封装：app:// 协议 + 下载接管 + 保存通知 + 记录文件真源 + 自定义保存位置 + 微信扫码登录原图下载 + 崩溃可见化/运行日志 + 官网同步满屏加载 + 原图下载字节级质量校验 + 官方元数据期望宽高完整性硬校验）",
+  "description": "壁纸工坊 Windows 桌面版（Electron 封装：app:// 协议 + 下载接管 + 保存通知 + 记录文件真源 + 自定义保存位置 + 微信扫码登录原图下载 + 崩溃可见化/运行日志 + 官网同步满屏加载 + 原图下载字节级质量校验 + 官方元数据期望宽高完整性硬校验 + 官网风控受限熔断与拟人下载节奏）",
   "author": "xiaobaiba999",
   "main": "main.js",
   "scripts": {

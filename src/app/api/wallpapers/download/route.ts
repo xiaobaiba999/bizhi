@@ -28,6 +28,47 @@ import { fetchOfficialOriginalMeta, type OfficialOriginalMeta } from "@/lib/zf-m
  */
 const dlSlots = createSemaphore(3, 8 * 60_000)
 
+/* ---------------- v1.4.15 官网风控受限熔断 ---------------- */
+
+/**
+ * 实测（2026-11 用户报告）：高频调用 getCompleteUrl 会触发官网风控，业务
+ * 响应 msg 形如「下载功能暂时受限，预计恢复时间：2027-11-16 22:19:08。
+ * 若有疑问请联系客服。」——继续撞击只会加重。检测到后进入短时熔断：
+ * 期间快速失败 429 DOWNLOAD_RESTRICTED（零官网请求），每 1 分钟放行一次
+ * 真实探测（服务器版多为单张下载场景，探测频率比桌面版更保守）。
+ */
+const RESTRICTED_RE = /受限|恢复时间|禁止下载|封禁|联系客服/
+const RESTRICTED_PROBE_MS = 60_000
+let restrictedUntil = 0
+let restrictedMsg = ""
+let restrictedProbeAt = 0
+
+/** 解析「恢复时间：YYYY-MM-DD HH:mm[:ss]」→ epoch ms（本地时区） */
+function parseRestrictedUntil(msg: string): number {
+  const m = msg.match(/(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/)
+  if (!m) return 0
+  const t = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6] || 0)
+  ).getTime()
+  return Number.isFinite(t) ? t : 0
+}
+
+/** 标记受限并写运行日志（审计轨迹） */
+function markRestricted(msg: string, fallbackMs = 10 * 60_000) {
+  restrictedMsg = msg
+  const until = parseRestrictedUntil(msg)
+  restrictedUntil = until > Date.now() ? until : Date.now() + fallbackMs
+  restrictedProbeAt = Date.now()
+  console.warn(
+    `[DOWNLOAD_RESTRICTED] 官网风控受限熔断至 ${new Date(restrictedUntil).toLocaleString()}：${msg || "429 限流"}`
+  )
+}
+
 /** 清洗文件名：去掉 Windows / macOS 非法字符 */
 function safeFilename(name: string): string {
   return (
@@ -80,7 +121,7 @@ async function fetchCompleteUrl(
     cache: "no-store",
   })
   if (res.status === 429) {
-    throw new Error("官网限流：操作太快了，请稍等几秒重试")
+    throw new Error("__RATE_LIMITED__")
   }
   const json = (await res.json().catch(() => null)) as CompleteUrlResponse | null
   if (!json) throw new Error(`官网响应异常（HTTP ${res.status}）`)
@@ -97,6 +138,11 @@ async function fetchCompleteUrl(
   // 305 [错误的请求 -> 3004/3005]：人机验证缺失/过期 或 wtId 不对
   if (status === 305) {
     throw new Error(`CERTIFY_OR_PARAM_ERROR:${msg || status}`)
+  }
+  // v1.4.15：官网风控「下载功能暂时受限」→ 熔断（内层抛出，外层统一回 429）
+  if (RESTRICTED_RE.test(msg)) {
+    markRestricted(msg)
+    throw new Error("__RESTRICTED__")
   }
   throw new Error(msg || `官网接口异常（HTTP ${res.status}）`)
 }
@@ -126,6 +172,21 @@ export async function GET(req: NextRequest) {
         )
       }
 
+      // ②' v1.4.15 风控熔断：受限期内快速失败（零官网请求），探测窗口放行一次
+      if (restrictedUntil > Date.now()) {
+        if (Date.now() - restrictedProbeAt < RESTRICTED_PROBE_MS) {
+          return NextResponse.json(
+            {
+              error: "DOWNLOAD_RESTRICTED",
+              msg: restrictedMsg || "官网下载功能暂时受限",
+              recoverAt: restrictedUntil,
+            },
+            { status: 429 }
+          )
+        }
+        restrictedProbeAt = Date.now()
+      }
+
       // ③ 官网人机验证 + getCompleteUrl 换签名直链（305 时重验一次）
       let target: string
       try {
@@ -150,6 +211,20 @@ export async function GET(req: NextRequest) {
           return NextResponse.json(
             { error: "AUTH_EXPIRED", msg: "登录令牌已失效，请重新扫码" },
             { status: 401, headers: { "X-Auth-Expired": "1" } }
+          )
+        }
+        // v1.4.15：官网风控受限 / 429 限流 → 429 DOWNLOAD_RESTRICTED（前端中止批量）
+        if (msg === "__RESTRICTED__" || msg === "__RATE_LIMITED__") {
+          if (msg === "__RATE_LIMITED__" && restrictedUntil < Date.now()) {
+            markRestricted("官网限流：操作太快了", 60_000)
+          }
+          return NextResponse.json(
+            {
+              error: "DOWNLOAD_RESTRICTED",
+              msg: restrictedMsg || "官网下载功能暂时受限，请稍后重试",
+              recoverAt: restrictedUntil,
+            },
+            { status: 429 }
           )
         }
         console.error("getCompleteUrl error:", e)
