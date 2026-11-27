@@ -47,20 +47,36 @@ export interface DesktopBridge {
   /** 官网实测令牌是否仍有效（true / false / null 无法判定） */
   loginVerify(wtId: string): Promise<{ valid: boolean | null; msg?: string }>
   /**
-   * 原图直存：主进程完成 ALTCHA 人机验证 → getCompleteUrl 换官网原图直链 →
-   * 下载字节经字节级质量校验（预览图/未知格式一律拒绝保存）后直接写入
-   * 壁纸保存目录。ok=false 时绝不落盘：无令牌 / 令牌失效 / 质量不达标 /
-   * 官网异常，渲染层按 reason 引导扫码或提示重试。
+   * 原图直存（v1.4.14 完整性硬校验）：主进程先取官网详情页 JSON-LD 官方
+   * 元数据（期望宽高，不硬编码固定尺寸）→ ALTCHA 人机验证 → getCompleteUrl
+   * 换官网原图直链 → 下载字节经字节级质量校验（期望宽高逐一硬比对，任一
+   * 不符即拒：裁切/缩放/拉伸/改比例全拒；预览图/未知格式一律拒绝保存）
+   * 后直接写入壁纸保存目录。ok=false 时绝不落盘：无令牌 / 令牌失效 /
+   * 质量不达标 / 官网异常，渲染层按 reason 引导扫码或提示重试。
    */
   downloadOriginal(wtId: string, filename: string, previewSrc: string): Promise<{
     ok: boolean
     quality: "original" | "preview"
-    reason?: "no-token" | "auth-expired" | "error" | "quality-mismatch"
+    reason?:
+      | "no-token"
+      | "auth-expired"
+      | "error"
+      | "quality-mismatch"
+      | "resolution-mismatch"
+      | "format-mismatch"
+      | "sha-mismatch"
+      | "size-mismatch"
     savedPath?: string
     width?: number
     height?: number
+    /** 官网原图期望宽高（元数据可用时回传，UI 展示对比） */
+    expectedWidth?: number
+    expectedHeight?: number
+    aspectRatio?: number
     format?: string
     bytes?: number
+    /** true = 本次经过了官方元数据期望宽高的硬校验 */
+    metaVerified?: boolean
     msg?: string
   }>
   /** 菜单「微信扫码登录…」点击：通知渲染层打开登录弹窗 */

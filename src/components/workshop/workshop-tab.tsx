@@ -55,6 +55,48 @@ interface ListState {
 
 const INITIAL: ListState = { items: [], hasMore: true, loading: false, error: null }
 
+/** 下载失败原因（与服务端 502 error 码 / 主进程 reason 对齐） */
+type DownloadFailReason =
+  | "no-token"
+  | "auth-expired"
+  | "error"
+  | "quality-mismatch"
+  | "resolution-mismatch"
+  | "format-mismatch"
+  | "sha-mismatch"
+  | "size-mismatch"
+
+/** 单次下载结果（v1.4.14）：成功带实际尺寸/体积，失败带原因 */
+interface DownloadResult {
+  ok: boolean
+  width?: number
+  height?: number
+  bytes?: number
+  reason?: DownloadFailReason
+  msg?: string
+}
+
+/** 字节数 → 人类可读（下载成功提示展示体积） */
+function formatBytes(bytes?: number): string | undefined {
+  if (!bytes || bytes <= 0) return undefined
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
+}
+
+/** 失败原因简述（批量汇总时逐张列出） */
+function failBrief(r: DownloadResult): string {
+  switch (r.reason) {
+    case "no-token": return "需扫码登录"
+    case "auth-expired": return "登录已失效"
+    case "resolution-mismatch": return "分辨率与官网原图不符"
+    case "format-mismatch": return "格式与官网原图不符"
+    case "size-mismatch": return "体积异常偏小（疑似重压缩）"
+    case "sha-mismatch": return "内容与官网不一致（SHA-256）"
+    case "quality-mismatch": return "官网返回预览图"
+    default: return r.msg ? r.msg.slice(0, 40) : "下载失败"
+  }
+}
+
 /** 首屏填充目标（v1.4.11）：一次加载至少铺满两屏，官网级满屏体验 */
 const FIRST_FILL_TARGET = 48
 /** 滚动每批目标：比旧版（12）翻倍，快速滚动不等待 */
@@ -462,28 +504,37 @@ export function WorkshopTab() {
   )
 
   /**
-   * 触发一个下载（v1.4.13 质量硬保证）。
+   * 触发一个下载（v1.4.14 原图完整性硬保证）。
    *
    * 背景（实测官网 CDN 行为，scripts/original-download-quality-test.mjs 取证）：
    * 未登录状态即使访问原图 .png 直链，CDN 也只回 890×556 / 约 25KB 的 webp
    * 预览小图；4K/7K 原图仅对登录用户通过「ALTCHA 人机验证 + getCompleteUrl
    * 签名直链」开放（未登录 401）。
    *
-   * 三条链路遵守同一铁律 —— 拿不到原图就不保存、明确提示：
-   * 1. 桌面版（Electron 桥）：主进程原图直存 + 字节级质量校验（预览图
-   *    拒绝保存）。无令牌 / 令牌失效 / 质量不达标 → 引导扫码，登录成功
-   *    自动续传刚才那批，绝不静默保存小图冒充原图。
-   * 2. 服务器版：/api 代理 + 同样的质量校验；无令牌 401 → 引导扫码续传。
+   * 官网详情页 JSON-LD 公开声明每张原图的官方宽高（如 6912×4320，不硬编码
+   * 任何固定尺寸）—— 下载字节必须与之一一完全一致，任一不符即拒绝保存
+   * （裁切/缩放/拉伸/改比例全拒），格式与体积下限同步硬校验。
+   *
+   * 三条链路遵守同一铁律 —— 拿不到与官网一致的原图就不保存、明确提示：
+   * 1. 桌面版（Electron 桥）：主进程原图直存 + 官方元数据期望宽高硬校验。
+   *    无令牌 / 令牌失效 / 分辨率不符 / 质量不达标 → 引导扫码或明确报错，
+   *    登录成功自动续传，绝不静默保存小图冒充原图。
+   * 2. 服务器版：/api 代理 + 同样的期望宽高硬校验；无令牌 401 → 引导扫码续传。
    * 3. Pages 在线版（无桥无令牌链路）：只引导安装桌面版，不保存预览图。
    *
-   * 返回 Promise<boolean>：true = 下载成功（已保存）；false = 未保存
-   * （引导登录 / 质量拦截 / 异常，对应 toast 已由本函数弹出）。
-   * 调用方据此决定是否乐观移除卡片 —— 失败的壁纸留在原地不误导。
+   * 返回 DownloadResult：ok=true 表示已保存（带实际尺寸/体积，UI 直接展示
+   * 「已保存官网原图 6912×4320 · 8.3MB」）；ok=false 时对应 toast 已由本
+   * 函数弹出（silentSuccess=true 时成功 toast 由调用方汇总弹）。调用方据
+   * ok 决定是否隐藏卡片 —— 失败的壁纸留在原地不误导。
    */
-  const triggerDownload = (w: ZhefengWallpaper): Promise<boolean> => {
+  const triggerDownload = (
+    w: ZhefengWallpaper,
+    opts?: { silentSuccess?: boolean }
+  ): Promise<DownloadResult> => {
+    const silent = opts?.silentSuccess === true
     if (IS_STATIC_EXPORT) {
       return (async () => {
-        // 桌面版：主进程原图直存（成功则直接写入保存目录并弹系统通知）
+        // 桌面版：主进程原图直存（官方元数据期望宽高硬校验后直接写入保存目录）
         if (desktopBridge) {
           try {
             const r = await desktopBridge.downloadOriginal(
@@ -493,13 +544,23 @@ export function WorkshopTab() {
             )
             if (r.ok) {
               recordLocalDownload({ id: w.id, title: w.title, src: w.src })
-              toast.success("已保存高清原图（与官网一致）", {
-                description: r.savedPath
-                  ? `${r.savedPath}${r.width && r.height ? `（${r.width}×${r.height}）` : ""}`
-                  : undefined,
-                duration: 6000,
-              })
-              return true
+              if (!silent) {
+                toast.success(
+                  r.width && r.height
+                    ? `已保存官网原图 ${r.width}×${r.height}`
+                    : "已保存官网原图（与官网一致）",
+                  {
+                    description: [
+                      r.bytes ? formatBytes(r.bytes) : undefined,
+                      r.savedPath,
+                    ]
+                      .filter(Boolean)
+                      .join(" · "),
+                    duration: 6000,
+                  }
+                )
+              }
+              return { ok: true, width: r.width, height: r.height, bytes: r.bytes }
             }
             // 无令牌 / 令牌失效：引导重新扫码，登录后自动续传，不保存 890px 小图冒充原图
             if (r.reason === "no-token" || r.reason === "auth-expired") {
@@ -513,26 +574,42 @@ export function WorkshopTab() {
                   action: { label: r.reason === "auth-expired" ? "重新扫码" : "立即扫码", onClick: () => setTokenOpen(true) },
                 }
               )
-              return false
+              return { ok: false, reason: r.reason }
             }
-            // 质量不达标（字节级校验拦截）：明确告知未保存，绝不留模糊图
-            if (r.reason === "quality-mismatch") {
+            // 分辨率与官网不符（裁切/缩放/拉伸/改比例全部落在这里）：明确告知未保存
+            if (r.reason === "resolution-mismatch") {
+              toast.error("已阻止保存：分辨率与官网原图不符", {
+                description:
+                  r.msg ??
+                  `官网原图 ${r.expectedWidth ?? "?"}×${r.expectedHeight ?? "?"}，实际收到 ` +
+                    `${r.width ?? "?"}×${r.height ?? "?"}，已拒绝保存，避免拿到裁切/缩放版本`,
+                duration: 10000,
+              })
+              return { ok: false, reason: r.reason, msg: r.msg, width: r.width, height: r.height }
+            }
+            // 其余完整性拦截（格式伪装 / 体积缩水 / SHA 不一致 / 预览图）：明确告知未保存
+            if (
+              r.reason === "quality-mismatch" ||
+              r.reason === "format-mismatch" ||
+              r.reason === "size-mismatch" ||
+              r.reason === "sha-mismatch"
+            ) {
               toast.error("已拦截非原图内容，未保存任何文件", {
                 description: r.msg ?? "官网返回的内容未达到原图标准，已自动拒绝保存",
                 duration: 10000,
               })
-              return false
+              return { ok: false, reason: r.reason, msg: r.msg }
             }
             // 官网接口 / 网络异常：提示重试，不静默降级（避免误收模糊图）
             toast.error("原图下载失败，请稍后重试", {
               description: r.msg,
               duration: 8000,
             })
-            return false
+            return { ok: false, reason: "error", msg: r.msg }
           } catch {
             /* 主进程异常：同样不静默降级 */
             toast.error("原图下载失败，请稍后重试")
-            return false
+            return { ok: false, reason: "error" }
           }
         }
         // Pages 在线版：无主进程无令牌链路，官网原图拿不到 —— 明确引导
@@ -546,10 +623,11 @@ export function WorkshopTab() {
             onClick: () => window.open("https://github.com/xiaobaiba999/bizhi/releases", "_blank"),
           },
         })
-        return false
+        return { ok: false, reason: "error" }
       })()
     }
-    // 服务器版：fetch + blob 下载（服务端已做质量校验；401 引导扫码续传）
+    // 服务器版：fetch + blob 下载（服务端已做官方元数据期望宽高硬校验；
+    // 401 引导扫码续传）
     return (async () => {
       try {
         const res = await fetch(
@@ -572,19 +650,37 @@ export function WorkshopTab() {
               },
             }
           )
-          return false
+          return { ok: false, reason: data?.error === "AUTH_EXPIRED" ? "auth-expired" : "no-token" }
         }
         if (!res.ok) {
-          const data = (await res.json().catch(() => null)) as { error?: string; msg?: string } | null
-          if (data?.error === "DOWNLOAD_QUALITY_MISMATCH") {
-            toast.error("已拦截非原图内容，未保存任何文件", {
-              description: data.msg,
-              duration: 10000,
-            })
-            return false
+          const data = (await res.json().catch(() => null)) as {
+            error?: string
+            msg?: string
+          } | null
+          // 完整性拦截（服务端 502：分辨率/格式/体积/SHA/预览图）——明确告知未保存
+          const gateReason: DownloadFailReason | undefined =
+            data?.error === "DOWNLOAD_RESOLUTION_MISMATCH"
+              ? "resolution-mismatch"
+              : data?.error === "DOWNLOAD_FORMAT_MISMATCH"
+                ? "format-mismatch"
+                : data?.error === "DOWNLOAD_SIZE_MISMATCH"
+                  ? "size-mismatch"
+                  : data?.error === "DOWNLOAD_SHA256_MISMATCH"
+                    ? "sha-mismatch"
+                    : data?.error === "DOWNLOAD_QUALITY_MISMATCH"
+                      ? "quality-mismatch"
+                      : undefined
+          if (gateReason) {
+            toast.error(
+              gateReason === "resolution-mismatch"
+                ? "已阻止保存：分辨率与官网原图不符"
+                : "已拦截非原图内容，未保存任何文件",
+              { description: data?.msg, duration: 10000 }
+            )
+            return { ok: false, reason: gateReason, msg: data?.msg }
           }
           toast.error("原图下载失败，请稍后重试", { description: data?.msg ?? data?.error })
-          return false
+          return { ok: false, reason: "error", msg: data?.msg }
         }
         const blob = await res.blob()
         const dims = res.headers.get("X-Image-Dimensions")
@@ -593,15 +689,18 @@ export function WorkshopTab() {
         const m = /filename\*=UTF-8''([^;]+)/.exec(cd)
         const filename = m ? decodeURIComponent(m[1]) : `${safeClientName(w.title)}.png`
         saveBlobViaAnchor(filename, blob)
-        toast.success("已保存高清原图（与官网一致）", {
-          description: dims ? `分辨率 ${dims}` : undefined,
-        })
-        return true
+        if (!silent) {
+          toast.success(
+            dims ? `已保存官网原图 ${dims.replace("x", "×")}` : "已保存高清原图（与官网一致）",
+            { description: formatBytes(blob.size), duration: 6000 }
+          )
+        }
+        return { ok: true, bytes: blob.size }
       } catch (e) {
         toast.error("下载失败，请稍后重试", {
           description: e instanceof Error ? e.message : undefined,
         })
-        return false
+        return { ok: false, reason: "error" }
       }
     })()
   }
@@ -658,27 +757,56 @@ export function WorkshopTab() {
   }, [])
 
   /**
-   * 批量下载选中壁纸：0.7s 间隔逐张触发（服务端再排队回源），
-   * 18 张全部铺开也不会挤占缩略图代理的带宽。
-   * v1.4.13：桌面版先预检令牌，未登录一次引导（不逐张弹 toast）；
-   * 整批进入续传队列，登录成功后自动继续整批。
+   * 批量下载选中壁纸（v1.4.14 逐张硬校验）：0.7s 间隔逐张触发，每张独立过
+   * 官方元数据期望宽高闸门 —— 只有真实保存成功的才隐藏卡片，失败的原地
+   * 保留并逐张提示原因，最后汇总「成功 X / 失败 Y + 失败清单」。
+   * 绝不因前面几张成功就把整批当作成功。
    */
   const batchDownload = () => {
     if (selected.length === 0) return
     void (async () => {
       if (!(await ensureLoginOrGuide(selected))) return
-      selected.forEach((w, i) => setTimeout(() => triggerDownload(w), i * 700))
-      toast.success(`开始下载 ${selected.length} 张壁纸，下载过的之后不再显示`, {
-        duration: 6000,
-      })
-      // 乐观移除：下载记录落库后由后台刷新同步真实状态
-      const ids = new Set(selected.map((w) => w.id))
-      setList((s) => ({ ...s, items: s.items.filter((w) => !ids.has(w.id)) }))
-      setDownloadedCount((n) => n + selected.length)
+      const targets = [...selected]
       setSelected([])
+      toast.info(`开始逐张下载 ${targets.length} 张（每张独立校验官网原图）…`, {
+        duration: 4000,
+      })
+      const results: { w: ZhefengWallpaper; r: DownloadResult }[] = []
+      for (let i = 0; i < targets.length; i++) {
+        if (i > 0) await new Promise((res) => setTimeout(res, 700))
+        results.push({
+          w: targets[i],
+          r: await triggerDownload(targets[i], { silentSuccess: true }),
+        })
+      }
+      const okItems = results.filter((x) => x.r.ok)
+      const failItems = results.filter((x) => !x.r.ok)
+      // 逐张处理：只有真实保存成功的才隐藏卡片（失败原因已逐张 toast）
+      const okIds = new Set(okItems.map((x) => x.w.id))
+      if (okIds.size > 0) {
+        setList((s) => ({ ...s, items: s.items.filter((w) => !okIds.has(w.id)) }))
+        setDownloadedCount((n) => n + okIds.size)
+      }
+      // 汇总（成功一张/多张都给明确结果；失败清单逐张列出原因）
+      if (failItems.length === 0) {
+        toast.success(`批量下载完成：${okItems.length} 张全部保存为官网原图`, { duration: 6000 })
+      } else {
+        const lines = failItems
+          .slice(0, 4)
+          .map((x) => `「${x.w.title}」：${failBrief(x.r)}`)
+          .join("\n")
+        toast.warning(
+          `批量下载完成：成功 ${okItems.length} 张，失败 ${failItems.length} 张（失败的原地保留）`,
+          {
+            description:
+              lines + (failItems.length > 4 ? `\n…另有 ${failItems.length - 4} 张失败` : ""),
+            duration: 15000,
+          }
+        )
+      }
       // 后台静默刷新两趟（不清屏、失败也不影响当前显示）：
       // 8s 同步已落库的下载记录，32s 兑现仍在排队中的尾部下载
-      if (hideDownloaded) {
+      if (hideDownloaded && okIds.size > 0) {
         autoRefreshLater(8_000)
         autoRefreshLater(32_000)
       }
@@ -686,21 +814,21 @@ export function WorkshopTab() {
   }
 
   /**
-   * 单张下载入口（v1.4.13）：先确保已登录（桌面版），未登录引导扫码且
-   * 卡片留在原地；已登录才触发下载，**下载成功才乐观移除**（失败不误导）。
+   * 单张下载入口（v1.4.14）：先确保已登录（桌面版），未登录引导扫码且
+   * 卡片留在原地；已登录才触发下载，**下载成功才隐藏卡片**（失败不误导）。
    */
   const downloadOne = (w: ZhefengWallpaper) => {
     void (async () => {
       if (!(await ensureLoginOrGuide([w]))) return
-      toast.info(`正在获取「${w.title}」的高清原图…`)
-      const ok = await triggerDownload(w)
-      if (ok) onDownloadOne(w)
+      toast.info(`正在获取「${w.title}」的官网原图…`)
+      const r = await triggerDownload(w)
+      if (r.ok) onDownloadOne(w)
     })()
   }
 
-  /** 单张下载成功后：隐藏卡片 + 计数（v1.4.13：仅在真实保存成功后调用） */
+  /** 单张下载成功后：隐藏卡片 + 计数（成功提示已由 triggerDownload 弹出，
+   *  含实际尺寸与体积，此处不重复 toast） */
   const onDownloadOne = (w: ZhefengWallpaper) => {
-    toast.success(`「${w.title}」原图已保存，下载过的壁纸之后不再显示`)
     if (hideDownloaded) {
       setList((s) => ({ ...s, items: s.items.filter((i) => i.id !== w.id) }))
       setDownloadedCount((n) => n + 1)
@@ -759,7 +887,7 @@ export function WorkshopTab() {
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-black tracking-tight sm:text-[28px]">壁纸工坊</h1>
           <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
-            v1.4.13 桌面版
+            v1.4.14 桌面版
           </span>
           {/* 扫码登录（v1.4.9）：桌面版主进程托管 / 服务器版 API；
               纯静态网页版（GitHub Pages 无桥无服务端）不显示 */}
@@ -1163,23 +1291,56 @@ export function WorkshopTab() {
           onOpenChange={setTokenOpen}
           probeWtId={list.items[0]?.wtId ?? list.items[0]?.id ?? null}
           onLoggedIn={() => {
-            // 登录成功 → 自动续传刚才因未登录被拦下的那批（v1.4.13：单张/批量通用）
+            // 登录成功 → 自动续传刚才因未登录被拦下的那批（v1.4.14：逐张
+            // 硬校验，成功才隐藏卡片，多张时汇总结果）
             const queue = pending
             if (queue.length === 0) return
             setPending([])
             toast.success(
               queue.length === 1
-                ? "登录成功，正在继续下载刚才的高清原图"
-                : `登录成功，正在继续下载刚才的 ${queue.length} 张高清原图`
+                ? "登录成功，正在继续下载刚才的官网原图"
+                : `登录成功，正在继续下载刚才的 ${queue.length} 张官网原图`
             )
-            queue.forEach((w, i) =>
-              setTimeout(() => {
-                void (async () => {
-                  const ok = await triggerDownload(w)
-                  if (ok) onDownloadOne(w)
-                })()
-              }, 800 + i * 700)
-            )
+            void (async () => {
+              const results: { w: ZhefengWallpaper; r: DownloadResult }[] = []
+              for (let i = 0; i < queue.length; i++) {
+                if (i > 0) await new Promise((res) => setTimeout(res, 700))
+                results.push({
+                  w: queue[i],
+                  r: await triggerDownload(queue[i], { silentSuccess: queue.length > 1 }),
+                })
+              }
+              const okIds = new Set(
+                results.filter((x) => x.r.ok).map((x) => x.w.id)
+              )
+              if (okIds.size > 0) {
+                setList((s) => ({ ...s, items: s.items.filter((w) => !okIds.has(w.id)) }))
+                setDownloadedCount((n) => n + okIds.size)
+                if (hideDownloaded) {
+                  autoRefreshLater(8_000)
+                  autoRefreshLater(32_000)
+                }
+              }
+              const fails = results.filter((x) => !x.r.ok)
+              if (queue.length > 1) {
+                if (fails.length === 0) {
+                  toast.success(`续传完成：${results.length} 张全部保存为官网原图`)
+                } else {
+                  toast.warning(
+                    `续传完成：成功 ${results.length - fails.length} 张，失败 ${fails.length} 张`,
+                    {
+                      description:
+                        fails
+                          .slice(0, 4)
+                          .map((x) => `「${x.w.title}」：${failBrief(x.r)}`)
+                          .join("\n") +
+                        (fails.length > 4 ? `\n…另有 ${fails.length - 4} 张失败` : ""),
+                      duration: 15000,
+                    }
+                  )
+                }
+              }
+            })()
           }}
         />
       )}

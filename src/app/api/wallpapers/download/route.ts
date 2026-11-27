@@ -4,19 +4,25 @@ import { isZhefengImageUrl } from "@/lib/zhefeng"
 import { zfCompleteUrl, zfUpstreamHeaders } from "@/lib/zf-login"
 import { ensureCertified, invalidateCertification } from "@/lib/zf-certify"
 import { createSemaphore } from "@/lib/semaphore"
-import { validateOriginalImage } from "@/lib/image-quality"
+import { validateOriginalImage, type OriginalExpect } from "@/lib/image-quality"
+import { fetchOfficialOriginalMeta, type OfficialOriginalMeta } from "@/lib/zf-meta"
 
 /**
  * GET /api/wallpapers/download?src=<img-url>&name=<title>&id=<file-id>&wtId=<详情id>
  *
- * v1.4.13 质量硬保证（对齐用户验收标准）：
- * - 只交付「与官网一致」的原图：本地令牌 → ALTCHA 人机验证 → getCompleteUrl
- *   签名直链 → 代理下载 → 字节级质量校验（src/lib/image-quality.ts）。
+ * v1.4.14 原图完整性硬保证（对齐用户验收标准）：
+ * - 只交付「与官网一致」的原图：官网详情页 JSON-LD 官方元数据（期望宽高/
+ *   体积下限，不硬编码任何固定尺寸）→ 本地令牌 → ALTCHA 人机验证 →
+ *   getCompleteUrl 签名直链 → 代理下载 → 字节级质量校验
+ *   （src/lib/image-quality.ts）：期望宽高逐一硬比对（任一不符即拒：
+ *   裁切/缩放/拉伸/改比例全拒）+ 魔数识别真实格式 + 体积下限。
  * - 禁止静默降级：无令牌 → 401 NEED_LOGIN（前端引导扫码，登录后自动续传）；
  *   令牌失效 → 401 + X-Auth-Expired；官网接口异常 → 502。任何情况下都不
  *   把 CDN 预览图（890px/25KB webp）当原图保存。
- * - 校验不过 → 502 DOWNLOAD_QUALITY_MISMATCH，不写下载记录、不返回字节。
+ * - 校验不过 → 502 DOWNLOAD_RESOLUTION_MISMATCH / DOWNLOAD_QUALITY_MISMATCH
+ *   等（响应带 expected/actual），不写下载记录、不返回字节。
  * - 扩展名按字节真实格式（png/jpg/webp），杜绝 preview.webp 改名 .png。
+ * - 链路全程原始字节直传（Buffer → Response），无任何 resize/crop/重编码。
  *
  * 成功响应头：X-Wallpaper-Quality: original + X-Image-Dimensions: WxH。
  */
@@ -150,7 +156,24 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ error: msg || "原图获取失败，请稍后重试" }, { status: 502 })
       }
 
-      // ④ 回源下载原图：整段读入内存（拿到完整字节即释放槽位）
+      // ④ 官网详情页 JSON-LD 官方元数据（期望宽高的唯一权威来源；非致命
+      //    —— 取不到时退回 v1.4.13 预览兜底闸门，绝不因元数据抖动阻断下载）
+      let meta: OfficialOriginalMeta | null = null
+      try {
+        meta = await fetchOfficialOriginalMeta(wtId || id)
+      } catch {
+        meta = null
+      }
+      const expect: OriginalExpect | undefined = meta
+        ? {
+            width: meta.width,
+            height: meta.height,
+            // 体积下限：官方 contentSize 的 50%（辅助线，仅拦「同尺寸重压缩缩水」）
+            ...(meta.contentSizeBytes ? { minBytes: Math.floor(meta.contentSizeBytes * 0.5) } : {}),
+          }
+        : undefined
+
+      // ⑤ 回源下载原图：整段读入内存（拿到完整字节即释放槽位）
       const upstream = await fetch(target, {
         headers: zfUpstreamHeaders({ token: tokenRow.token }),
         signal: AbortSignal.timeout(120000),
@@ -167,24 +190,27 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ error: "原图内容为空" }, { status: 502 })
       }
 
-      // ⑤ 质量硬闸门：字节级校验宽高/格式/体积，预览图一律拒绝交付
-      const check = validateOriginalImage(buffer)
+      // ⑥ 质量硬闸门：期望宽高逐一硬比对 + 字节级校验，预览图/裁切/缩放/
+      //    改比例/重压缩一律拒绝交付
+      const check = validateOriginalImage(buffer, expect)
       if (!check.ok) {
         console.error(
-          `DOWNLOAD QUALITY MISMATCH: expected original (>1100px), ` +
+          `DOWNLOAD GATE [${check.code}]: expected ` +
+            `${expect ? `${expect.width}x${expect.height}` : "(meta unavailable)"}, ` +
             `actual ${check.width ?? "?"}x${check.height ?? "?"} / ${(check.bytes ?? 0) / 1024}KB`
         )
         return NextResponse.json(
           {
-            error: "DOWNLOAD_QUALITY_MISMATCH",
+            error: check.code ?? "DOWNLOAD_QUALITY_MISMATCH",
             msg: check.msg,
             actual: { width: check.width, height: check.height, bytes: check.bytes },
+            expected: expect ? { width: expect.width, height: expect.height } : null,
           },
           { status: 502 }
         )
       }
 
-      // ⑥ 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
+      // ⑦ 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
       const filename = `${safeFilename(name)}.${check.ext}`
       const contentTypeByFormat: Record<string, string> = {
         png: "image/png",
@@ -197,7 +223,7 @@ export async function GET(req: NextRequest) {
         (upstream.headers.get("content-type") ?? "").split(";")[0].trim() ??
         "application/octet-stream"
 
-      // ⑦ 全部通过才写下载记录（键 = 文件 id，与列表过滤一致）
+      // ⑧ 全部通过才写下载记录（键 = 文件 id，与列表过滤一致）
       if (id) {
         try {
           await db.download.upsert({

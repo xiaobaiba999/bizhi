@@ -13,17 +13,22 @@
  *    - 用户确认后主进程代替浏览器走官网 wxLogin 回调 → stateLogin 轮询拿令牌
  *    - 令牌写入 userData/ww-settings.json（跨版本升级永不丢）
  * 2. ALTCHA 人机验证（getCompleteUrl 的前置要求，会话缓存 8 分钟复用）
- * 3. 原图直存：getCompleteUrl 换官网原图直链 → 下载字节经质量校验
- *    （desktop/image-quality.js：字节级宽高/格式/体积判定，预览图一律
- *    拒绝保存，扩展名按真实内容定）后写入保存目录
+ * 3. 原图直存（v1.4.14 完整性硬校验）：先取官网详情页 JSON-LD 官方元数据
+ *    （desktop/zf-meta.js：官方 width/height/contentSize，不硬编码任何固定
+ *    尺寸）→ getCompleteUrl 换官网原图直链 → 下载字节经质量校验
+ *    （desktop/image-quality.js：期望宽高逐一硬比对（杜绝裁切/缩放/改
+ *    比例）+ 魔数识别真实格式 + 体积下限 + 预览图兜底拒绝，扩展名按真实
+ *    内容定）后写入保存目录。链路全程原始字节直写，无任何 resize/crop/
+ *    重编码。
  *
- * 与服务器版 src/lib/zf-login.ts / zf-certify.ts 逻辑逐行对齐。
+ * 与服务器版 src/lib/zf-login.ts / zf-certify.ts / zf-meta.ts 逻辑逐行对齐。
  */
 
 "use strict";
 
 const { createHash, randomUUID } = require("node:crypto");
 const { validateOriginalImage } = require("./image-quality.js");
+const { fetchOfficialOriginalMeta } = require("./zf-meta.js");
 
 const API_BASE = "https://haowallpaper.com";
 const ZF_WX_APPID = "wx5b6879182de50dd6";
@@ -407,10 +412,11 @@ async function finalizeLogin(s, wxCode) {
  *   - writeSettings(s): void               写设置（令牌持久化）
  *   - getSaveDir(): string                 壁纸保存目录
  *   - uniqueSavePath(dir, name): string    同名不覆盖的保存路径
- *   - notifySaved(quality, filename): void 保存完成通知（复用系统通知）
+ *   - log(line): void                      可选：主进程运行日志（质量闸门
+ *                                          决策写审计轨迹；缺省 no-op）
  */
 function createLoginModule(deps) {
-  const { readSettings, writeSettings, getSaveDir, uniqueSavePath } = deps;
+  const { readSettings, writeSettings, getSaveDir, uniqueSavePath, log = () => {} } = deps;
 
   /** 令牌脱敏展示：保留前 8 后 4 位 */
   const maskToken = (token) =>
@@ -550,13 +556,45 @@ function createLoginModule(deps) {
 
   let dlChain = Promise.resolve();
 
-  /** 单次原图直存：ALTCHA → getCompleteUrl → 下载字节 → 质量校验 → 写入保存目录 */
+  /** 校验失败码 → 结果 reason（UI 据此弹对应文案） */
+  const reasonOfCode = (code) =>
+    ({
+      DOWNLOAD_RESOLUTION_MISMATCH: "resolution-mismatch",
+      DOWNLOAD_FORMAT_MISMATCH: "format-mismatch",
+      DOWNLOAD_SHA256_MISMATCH: "sha-mismatch",
+      DOWNLOAD_SIZE_MISMATCH: "size-mismatch",
+      DOWNLOAD_QUALITY_MISMATCH: "quality-mismatch",
+    })[code] || "error";
+
+  /**
+   * 单次原图直存（v1.4.14 完整性硬校验）：
+   * 官方元数据（期望宽高/体积下限） → ALTCHA → getCompleteUrl → 下载字节
+   * → 质量校验（不通过绝不落盘）→ 原始字节直接写入保存目录。
+   * 元数据取不到时退回 v1.4.13 预览兑底闸门（绝不因元数据抖动阻断下载）。
+   */
   const runOriginalDownload = async (wtId, filename) => {
     const token = rawToken();
     if (!token) return { ok: false, quality: "preview", reason: "no-token" };
 
     const id = /^[0-9A-Za-z_-]{1,64}$/.test(String(wtId || "")) ? wtId : null;
     if (!id) return { ok: false, quality: "preview", reason: "error", msg: "壁纸 id 不合法" };
+
+    // 官网详情页 JSON-LD 官方元数据（期望宽高的唯一权威来源；非致命）
+    const meta = await fetchOfficialOriginalMeta(id);
+    const expect = meta
+      ? {
+          width: meta.width,
+          height: meta.height,
+          // 体积下限：官方 contentSize 的 50%（辅助线，仅拦「同尺寸重压缩缩水」）
+          ...(meta.contentSizeBytes ? { minBytes: Math.floor(meta.contentSizeBytes * 0.5) } : {}),
+        }
+      : undefined;
+    if (meta) {
+      log(`原图期望（官网元数据）：${meta.width}×${meta.height}` +
+        (meta.contentSizeBytes ? `，约 ${(meta.contentSizeBytes / 1024 / 1024).toFixed(2)}MB` : ""));
+    } else {
+      log("官网元数据不可用：退回预览兑底闸门（长边≤1100px 拒绝）");
+    }
 
     let target = null;
     try {
@@ -625,14 +663,20 @@ function createLoginModule(deps) {
       const buf = Buffer.from(await upstream.arrayBuffer());
       if (buf.length === 0) return { ok: false, quality: "preview", reason: "error", msg: "原图内容为空" };
 
-      // ---- v1.4.13 质量硬闸门：字节级校验，预览图/未知格式一律拒绝保存 ----
-      const check = validateOriginalImage(buf);
+      // ---- v1.4.14 质量硬闸门：期望宽高逐一硬比对 + 字节级校验，
+      // ---- 预览图/裁切/缩放/改比例/重压缩/未知格式一律拒绝保存
+      const check = validateOriginalImage(buf, expect);
       if (!check.ok) {
+        log(`质量闸门拦截 [${check.code}]：${check.msg}`);
         return {
           ok: false,
           quality: "preview",
-          reason: check.code === "FORMAT_UNKNOWN" ? "error" : "quality-mismatch",
+          reason: check.code === "FORMAT_UNKNOWN" ? "error" : reasonOfCode(check.code),
           msg: check.msg,
+          width: check.width,
+          height: check.height,
+          expectedWidth: check.expectedWidth,
+          expectedHeight: check.expectedHeight,
         };
       }
 
@@ -645,14 +689,21 @@ function createLoginModule(deps) {
       const savePath = uniqueSavePath(getSaveDir(), `${clean}.${check.ext}`);
       const fs = require("node:fs");
       fs.writeFileSync(savePath, buf);
+      log(`原图已保存：${savePath}（${check.width}×${check.height} ${check.format} ` +
+        `${(check.bytes / 1024 / 1024).toFixed(2)}MB，期望 ${expect ? `${expect.width}×${expect.height}` : "无"}，` +
+        `sha256:${createHash("sha256").update(buf).digest("hex").slice(0, 16)}）`);
       return {
         ok: true,
         quality: "original",
         savedPath: savePath,
         width: check.width,
         height: check.height,
+        aspectRatio: check.aspectRatio,
         format: check.format,
         bytes: check.bytes,
+        expectedWidth: expect ? expect.width : undefined,
+        expectedHeight: expect ? expect.height : undefined,
+        metaVerified: !!expect,
       };
     } catch (e) {
       return {

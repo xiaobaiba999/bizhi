@@ -70,6 +70,8 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "desktop/main.js",
     "desktop/preload.js",
     "desktop/zf-login.js",
+    "desktop/zf-meta.js",
+    "desktop/image-quality.js",
     ".desktop-render-build/**",
   ]
 }];
