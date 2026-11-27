@@ -1,6 +1,6 @@
 {
   "name": "wallpaper-workshop",
-  "version": "1.4.12",
+  "version": "1.4.13",
   "private": true,
   "description": "壁纸工坊 —— 哲风壁纸实时获取与原图下载工具（网页版 / 服务器版 / Windows 桌面版）",
   "scripts": {
@@ -14,7 +14,8 @@
     "db:reset": "prisma migrate reset",
     "desktop:icon": "node scripts/make-desktop-icon.mjs",
     "desktop:render": "node scripts/build-desktop.mjs render",
-    "desktop:dist": "node scripts/build-desktop.mjs dist"
+    "desktop:dist": "node scripts/build-desktop.mjs dist",
+    "test:quality": "bun scripts/original-download-quality-test.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

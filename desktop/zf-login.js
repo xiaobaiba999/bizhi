@@ -13,7 +13,9 @@
  *    - 用户确认后主进程代替浏览器走官网 wxLogin 回调 → stateLogin 轮询拿令牌
  *    - 令牌写入 userData/ww-settings.json（跨版本升级永不丢）
  * 2. ALTCHA 人机验证（getCompleteUrl 的前置要求，会话缓存 8 分钟复用）
- * 3. 原图直存：getCompleteUrl 换官网原图直链 → 下载字节直接写入保存目录
+ * 3. 原图直存：getCompleteUrl 换官网原图直链 → 下载字节经质量校验
+ *    （desktop/image-quality.js：字节级宽高/格式/体积判定，预览图一律
+ *    拒绝保存，扩展名按真实内容定）后写入保存目录
  *
  * 与服务器版 src/lib/zf-login.ts / zf-certify.ts 逻辑逐行对齐。
  */
@@ -21,6 +23,7 @@
 "use strict";
 
 const { createHash, randomUUID } = require("node:crypto");
+const { validateOriginalImage } = require("./image-quality.js");
 
 const API_BASE = "https://haowallpaper.com";
 const ZF_WX_APPID = "wx5b6879182de50dd6";
@@ -547,7 +550,7 @@ function createLoginModule(deps) {
 
   let dlChain = Promise.resolve();
 
-  /** 单次原图直存：ALTCHA → getCompleteUrl → 下载字节写入保存目录 */
+  /** 单次原图直存：ALTCHA → getCompleteUrl → 下载字节 → 质量校验 → 写入保存目录 */
   const runOriginalDownload = async (wtId, filename) => {
     const token = rawToken();
     if (!token) return { ok: false, quality: "preview", reason: "no-token" };
@@ -562,6 +565,9 @@ function createLoginModule(deps) {
         headers: zfHeaders({ token, ...(cookie ? { Cookie: cookie } : {}) }),
         signal: AbortSignal.timeout(15000),
       });
+      if (res.status === 429) {
+        return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
+      }
       const json = await res.json().catch(() => null);
       target = json ? digUrl(json) : null;
       if (!target) {
@@ -578,6 +584,9 @@ function createLoginModule(deps) {
             headers: zfHeaders({ token, ...(cookie2 ? { Cookie: cookie2 } : {}) }),
             signal: AbortSignal.timeout(15000),
           });
+          if (res2.status === 429) {
+            return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
+          }
           const json2 = await res2.json().catch(() => null);
           target = json2 ? digUrl(json2) : null;
           const status2 = Number(json2?.status ?? -1);
@@ -601,31 +610,50 @@ function createLoginModule(deps) {
       };
     }
 
-    // 下载原图字节并写入保存目录
+    // 下载原图字节 → 质量校验（不通过绝不落盘）→ 写入保存目录
     try {
       const upstream = await fetch(target, {
         headers: zfHeaders({ token }),
         signal: AbortSignal.timeout(120_000),
       });
+      if (upstream.status === 429) {
+        return { ok: false, quality: "preview", reason: "error", msg: "官网限流：操作太快了，请稍等几秒重试" };
+      }
       if (!upstream.ok) {
         return { ok: false, quality: "preview", reason: "error", msg: `原图下载失败（HTTP ${upstream.status}）` };
       }
       const buf = Buffer.from(await upstream.arrayBuffer());
       if (buf.length === 0) return { ok: false, quality: "preview", reason: "error", msg: "原图内容为空" };
 
-      // 文件名：清洗 + 从原图直链推断扩展名（官网原图多为 png）
+      // ---- v1.4.13 质量硬闸门：字节级校验，预览图/未知格式一律拒绝保存 ----
+      const check = validateOriginalImage(buf);
+      if (!check.ok) {
+        return {
+          ok: false,
+          quality: "preview",
+          reason: check.code === "FORMAT_UNKNOWN" ? "error" : "quality-mismatch",
+          msg: check.msg,
+        };
+      }
+
+      // 文件名：清洗 + 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
       const clean = String(filename || "wallpaper")
         .replace(/[\\/:*?"<>|]/g, " ")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 60) || "wallpaper";
-      const dot = target.lastIndexOf(".");
-      const urlExt = dot === -1 ? "" : target.slice(dot + 1).toLowerCase();
-      const ext = /^\w{2,5}$/.test(urlExt) ? urlExt : "png";
-      const savePath = uniqueSavePath(getSaveDir(), `${clean}.${ext}`);
+      const savePath = uniqueSavePath(getSaveDir(), `${clean}.${check.ext}`);
       const fs = require("node:fs");
       fs.writeFileSync(savePath, buf);
-      return { ok: true, quality: "original", savedPath: savePath };
+      return {
+        ok: true,
+        quality: "original",
+        savedPath: savePath,
+        width: check.width,
+        height: check.height,
+        format: check.format,
+        bytes: check.bytes,
+      };
     } catch (e) {
       return {
         ok: false,

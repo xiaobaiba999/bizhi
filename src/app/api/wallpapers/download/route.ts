@@ -1,20 +1,24 @@
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
-import { isZhefengImageUrl, upstreamHeaders } from "@/lib/zhefeng"
+import { isZhefengImageUrl } from "@/lib/zhefeng"
 import { zfCompleteUrl, zfUpstreamHeaders } from "@/lib/zf-login"
 import { ensureCertified, invalidateCertification } from "@/lib/zf-certify"
 import { createSemaphore } from "@/lib/semaphore"
+import { validateOriginalImage } from "@/lib/image-quality"
 
 /**
  * GET /api/wallpapers/download?src=<img-url>&name=<title>&id=<file-id>&wtId=<详情id>
  *
- * 下载质量两级（v1.4.9 恢复登录原图链路）：
- * - original：本地已存哲风令牌 → 先过官网 ALTCHA 人机验证 → getCompleteUrl
- *   换「与官网完全一致」的原图直链（4K/7K PNG）→ 代理下载
- * - preview：无令牌 / 令牌失效 / 验证失败 → 直接代理 CDN 直链（约 1100px）
+ * v1.4.13 质量硬保证（对齐用户验收标准）：
+ * - 只交付「与官网一致」的原图：本地令牌 → ALTCHA 人机验证 → getCompleteUrl
+ *   签名直链 → 代理下载 → 字节级质量校验（src/lib/image-quality.ts）。
+ * - 禁止静默降级：无令牌 → 401 NEED_LOGIN（前端引导扫码，登录后自动续传）；
+ *   令牌失效 → 401 + X-Auth-Expired；官网接口异常 → 502。任何情况下都不
+ *   把 CDN 预览图（890px/25KB webp）当原图保存。
+ * - 校验不过 → 502 DOWNLOAD_QUALITY_MISMATCH，不写下载记录、不返回字节。
+ * - 扩展名按字节真实格式（png/jpg/webp），杜绝 preview.webp 改名 .png。
  *
- * 无论哪种方式都写 Download 记录（键 = 文件 id，与列表过滤一致）；
- * 响应头 X-Wallpaper-Quality 标注实际质量，X-Auth-Expired=1 提示令牌需重新登录。
+ * 成功响应头：X-Wallpaper-Quality: original + X-Image-Dimensions: WxH。
  */
 const dlSlots = createSemaphore(3, 8 * 60_000)
 
@@ -27,13 +31,6 @@ function safeFilename(name: string): string {
       .trim()
       .slice(0, 60) || "wallpaper"
   )
-}
-
-/** 从直链推断扩展名 */
-function extOf(src: string) {
-  const dot = src.lastIndexOf(".")
-  const e = dot === -1 ? "" : src.slice(dot + 1).toLowerCase()
-  return /^\w{2,5}$/.test(e) ? e : "png"
 }
 
 /** getCompleteUrl 响应里深挖原图直链 */
@@ -76,6 +73,9 @@ async function fetchCompleteUrl(
     signal: AbortSignal.timeout(15000),
     cache: "no-store",
   })
+  if (res.status === 429) {
+    throw new Error("官网限流：操作太快了，请稍等几秒重试")
+  }
   const json = (await res.json().catch(() => null)) as CompleteUrlResponse | null
   if (!json) throw new Error(`官网响应异常（HTTP ${res.status}）`)
 
@@ -106,79 +106,54 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "仅支持哲风壁纸图片直链" }, { status: 400 })
   }
 
-  const ext = extOf(src)
-  const filename = `${safeFilename(name)}.${ext}`
-
-  /** 记录下载（键 = 文件 id，与列表过滤一致；质量随实际链路） */
-  const recordDownload = async (quality: "preview" | "original") => {
-    if (!id) return
-    try {
-      await db.download.upsert({
-        where: { id },
-        create: { id, title: safeFilename(name), src, wtId: wtId || null, quality },
-        update: { quality, wtId: wtId || undefined },
-      })
-    } catch (e) {
-      console.error("record download error:", e)
-    }
-  }
-
   try {
     // ① 占用回源槽位（最多 3 张并发，其余 FIFO 排队；排队超时抛 DOWNLOAD_QUEUE_TIMEOUT）
     await dlSlots.acquire()
 
     try {
-      // 令牌流程（人机验证 + getCompleteUrl）也在槽位内：拿到原图直链
-      let quality: "preview" | "original" = "preview"
-      let target = src
-      let extraHeaders: Record<string, string> = upstreamHeaders()
-      let authExpired = false
-
-      if (wtId || id) {
-        const tokenRow = await db.zfToken.findFirst({ orderBy: { createdAt: "desc" } })
-        if (tokenRow) {
-          try {
-            // 官网要求先过「我不是机器人」ALTCHA 人机验证，
-            // 否则 getCompleteUrl 一律 305 [错误的请求 -> 3004]
-            let cookie = await ensureCertified()
-            try {
-              const url = await fetchCompleteUrl(wtId || id, tokenRow.token, cookie)
-              target = url
-              quality = "original"
-              extraHeaders = zfUpstreamHeaders({ token: tokenRow.token })
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e)
-              if (msg === "AUTH_EXPIRED") throw e
-              // 3004：人机验证可能过期 → 强制重新验证后重试一次
-              if (msg.startsWith("CERTIFY_OR_PARAM_ERROR")) {
-                invalidateCertification()
-                cookie = await ensureCertified(true)
-                const url = await fetchCompleteUrl(wtId || id, tokenRow.token, cookie)
-                target = url
-                quality = "original"
-                extraHeaders = zfUpstreamHeaders({ token: tokenRow.token })
-              } else {
-                throw e
-              }
-            }
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e)
-            if (msg === "AUTH_EXPIRED") {
-              // 令牌确实失效：回退预览质量（响应头提示重新登录）
-              authExpired = true
-            } else {
-              console.error("getCompleteUrl error:", e)
-              // 其他异常：回退预览质量
-            }
-          }
-        }
+      // ② 令牌检查：无令牌直接 401 引导登录（绝不回退 CDN 预览）
+      const tokenRow = await db.zfToken.findFirst({ orderBy: { createdAt: "desc" } })
+      if (!tokenRow) {
+        return NextResponse.json(
+          { error: "NEED_LOGIN", msg: "下载高清原图需先扫码登录（官网原图仅对登录用户开放）" },
+          { status: 401, headers: { "X-Auth-Required": "1" } }
+        )
       }
 
-      // ② 回源下载：整段读入内存后再响应（拿到完整字节即释放槽位，
-      //    流式响应会一直占用到客户端收完，排队就失去意义）
+      // ③ 官网人机验证 + getCompleteUrl 换签名直链（305 时重验一次）
+      let target: string
+      try {
+        let cookie = await ensureCertified()
+        try {
+          target = await fetchCompleteUrl(wtId || id, tokenRow.token, cookie)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (msg === "AUTH_EXPIRED") throw e
+          if (msg.startsWith("CERTIFY_OR_PARAM_ERROR")) {
+            invalidateCertification()
+            cookie = await ensureCertified(true)
+            target = await fetchCompleteUrl(wtId || id, tokenRow.token, cookie)
+          } else {
+            throw e
+          }
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg === "AUTH_EXPIRED") {
+          // 令牌确实失效：401 提示重新扫码（前端登录成功后自动续传）
+          return NextResponse.json(
+            { error: "AUTH_EXPIRED", msg: "登录令牌已失效，请重新扫码" },
+            { status: 401, headers: { "X-Auth-Expired": "1" } }
+          )
+        }
+        console.error("getCompleteUrl error:", e)
+        return NextResponse.json({ error: msg || "原图获取失败，请稍后重试" }, { status: 502 })
+      }
+
+      // ④ 回源下载原图：整段读入内存（拿到完整字节即释放槽位）
       const upstream = await fetch(target, {
-        headers: extraHeaders,
-        signal: AbortSignal.timeout(60000),
+        headers: zfUpstreamHeaders({ token: tokenRow.token }),
+        signal: AbortSignal.timeout(120000),
         cache: "no-store",
       })
       if (!upstream.ok) {
@@ -187,23 +162,63 @@ export async function GET(req: NextRequest) {
           { status: 502 }
         )
       }
-      const contentType = (upstream.headers.get("content-type") ?? "").split(";")[0].trim()
       const buffer = Buffer.from(await upstream.arrayBuffer())
       if (buffer.length === 0) {
         return NextResponse.json({ error: "原图内容为空" }, { status: 502 })
       }
 
-      await recordDownload(quality)
+      // ⑤ 质量硬闸门：字节级校验宽高/格式/体积，预览图一律拒绝交付
+      const check = validateOriginalImage(buffer)
+      if (!check.ok) {
+        console.error(
+          `DOWNLOAD QUALITY MISMATCH: expected original (>1100px), ` +
+            `actual ${check.width ?? "?"}x${check.height ?? "?"} / ${(check.bytes ?? 0) / 1024}KB`
+        )
+        return NextResponse.json(
+          {
+            error: "DOWNLOAD_QUALITY_MISMATCH",
+            msg: check.msg,
+            actual: { width: check.width, height: check.height, bytes: check.bytes },
+          },
+          { status: 502 }
+        )
+      }
+
+      // ⑥ 扩展名按真实内容格式（杜绝 preview.webp 改名 .png）
+      const filename = `${safeFilename(name)}.${check.ext}`
+      const contentTypeByFormat: Record<string, string> = {
+        png: "image/png",
+        jpeg: "image/jpeg",
+        webp: "image/webp",
+        gif: "image/gif",
+      }
+      const contentType =
+        contentTypeByFormat[check.format ?? ""] ??
+        (upstream.headers.get("content-type") ?? "").split(";")[0].trim() ??
+        "application/octet-stream"
+
+      // ⑦ 全部通过才写下载记录（键 = 文件 id，与列表过滤一致）
+      if (id) {
+        try {
+          await db.download.upsert({
+            where: { id },
+            create: { id, title: safeFilename(name), src, wtId: wtId || null, quality: "original" },
+            update: { quality: "original", wtId: wtId || undefined },
+          })
+        } catch (e) {
+          console.error("record download error:", e)
+        }
+      }
 
       const headers = new Headers()
       headers.set("Content-Type", contentType || "application/octet-stream")
       headers.set(
         "Content-Disposition",
-        `attachment; filename="wallpaper.${ext}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+        `attachment; filename="wallpaper.${check.ext}"; filename*=UTF-8''${encodeURIComponent(filename)}`
       )
       headers.set("Content-Length", String(buffer.length))
-      headers.set("X-Wallpaper-Quality", quality)
-      if (authExpired) headers.set("X-Auth-Expired", "1")
+      headers.set("X-Wallpaper-Quality", "original")
+      headers.set("X-Image-Dimensions", `${check.width}x${check.height}`)
 
       return new NextResponse(new Uint8Array(buffer), { status: 200, headers })
     } finally {

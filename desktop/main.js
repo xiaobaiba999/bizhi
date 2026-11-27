@@ -649,10 +649,20 @@ function installSmoke(win) {
           report.loginError = String(e && e.message ? e.message : e);
         }
       }
-      // 下载行为验证（WW_SMOKE_DOWNLOAD=1，v1.4.12）：未登录点击「下载原图」
-      // → 应弹「扫码登录」引导 toast，且不静默保存 890px 小图
+      // 下载行为验证（WW_SMOKE_DOWNLOAD=1，v1.4.13）：未登录点击「下载原图」
+      // → 应弹「扫码登录」引导 toast，且绝不静默保存 890px 小图（保存目录
+      // 文件数点击前后必须一致 —— 质量硬保证的直接证据）
       if (process.env.WW_SMOKE_DOWNLOAD === "1") {
         try {
+          // 点击前后保存目录文件清单对比（目录可能不存在 = 0 文件）
+          const listSaveDir = () => {
+            try {
+              return fs.readdirSync(getSaveDir()).sort();
+            } catch {
+              return [];
+            }
+          };
+          const filesBefore = listSaveDir();
           // 先关掉可能开着的登录弹窗（ESC）
           await win.webContents.executeJavaScript(
             `(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true; })()`,
@@ -664,6 +674,7 @@ function installSmoke(win) {
             true
           );
           await new Promise((r) => setTimeout(r, 2500));
+          const filesAfter = listSaveDir();
           const s = await win.webContents
             .executeJavaScript(
               `(() => {
@@ -679,6 +690,12 @@ function installSmoke(win) {
               true
             )
             .catch(() => null);
+          if (s) {
+            s.filesBefore = filesBefore.length;
+            s.filesAfter = filesAfter.length;
+            // 质量硬保证：未登录不允许落盘任何文件（预览小图也不行）
+            s.noFileSaved = filesBefore.length === filesAfter.length;
+          }
           if (s) report.download = s;
         } catch (e) {
           report.downloadError = String(e && e.message ? e.message : e);

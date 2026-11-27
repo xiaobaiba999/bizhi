@@ -27,7 +27,6 @@ import {
 import {
   getLocalDownloadIds,
   clearLocalDownloads,
-  recordLocalDownload,
   countLocalDownloads,
 } from "@/lib/download-store"
 import {
@@ -239,7 +238,7 @@ export async function clearAllBlocked(): Promise<number> {
   return typeof data.blockedCount === "number" ? data.blockedCount : 0
 }
 
-/* ------------------------- 静态模式下载（CDN 直链 blob） ------------------------- */
+/* ------------------------- 静态模式下载辅助 ------------------------- */
 
 /** 清洗文件名：Windows / macOS 非法字符（与服务端 safeFilename 一致） */
 export function safeClientName(name: string): string {
@@ -252,26 +251,13 @@ export function safeClientName(name: string): string {
   )
 }
 
-/** 从直链推断扩展名 */
-function extOfSrc(src: string): string {
-  const dot = src.lastIndexOf(".")
-  const e = dot === -1 ? "" : src.slice(dot + 1).toLowerCase()
-  return /^\w{2,5}$/.test(e) ? e : "png"
-}
-
 /**
- * 静态模式：直连 CDN 取原图 blob。返回待保存字节与推荐文件名；
- * 记录同时写入 localStorage（下载过的自动隐藏）。
+ * v1.4.13 起 prepareWallpaperBlob（直连 CDN 取「原图」blob）已删除：
+ * 实测官网 CDN 对未登录请求一律返回 890px webp 预览（约 25KB），绝不是
+ * 原图 —— 静态在线版不再保存预览小图，改为引导安装桌面版扫码下载原图
+ * （见 workshop-tab.tsx triggerDownload）。原图链路唯一入口：
+ * 桌面版主进程 / 服务器版 /api/wallpapers/download（均带质量校验）。
  */
-export async function prepareWallpaperBlob(
-  w: ZhefengWallpaper
-): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(w.src, { cache: "no-store" })
-  if (!res.ok) throw new Error(`CDN 下载失败（HTTP ${res.status}）`)
-  const blob = await res.blob()
-  recordLocalDownload({ id: w.id, title: w.title, src: w.src })
-  return { blob, filename: `${safeClientName(w.title)}.${extOfSrc(w.src)}` }
-}
 
 /** 浏览器另存（object URL + <a download>；blob 同源无跨域限制，60s 后回收） */
 export function saveBlobViaAnchor(filename: string, blob: Blob) {
